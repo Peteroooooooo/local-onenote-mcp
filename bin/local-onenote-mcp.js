@@ -9,6 +9,14 @@ const { spawn, spawnSync } = require("child_process");
 const packageRoot = path.resolve(__dirname, "..");
 const packageJson = require(path.join(packageRoot, "package.json"));
 const markerName = `.installed-${packageJson.version}`;
+const markerPayload = JSON.stringify(
+  {
+    packageRoot,
+    version: packageJson.version,
+  },
+  null,
+  2
+);
 
 function log(message) {
   process.stderr.write(`[local-onenote-mcp] ${message}\n`);
@@ -101,13 +109,14 @@ function ensureVenv(python) {
     }
   }
 
-  if (!fs.existsSync(marker)) {
+  const installedMarker = fs.existsSync(marker) ? fs.readFileSync(marker, "utf8") : "";
+  if (installedMarker !== markerPayload) {
     log("installing Python package dependencies");
     const installed = run(py, ["-m", "pip", "install", "--upgrade", packageRoot]);
     if (installed.status !== 0) {
       throw new Error("Failed to install local-onenote-mcp into the cached Python environment.");
     }
-    fs.writeFileSync(marker, new Date().toISOString(), "utf8");
+    fs.writeFileSync(marker, markerPayload, "utf8");
   }
 
   return py;
