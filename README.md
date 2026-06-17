@@ -22,15 +22,24 @@ library unavailable to Python automation libraries.
 - Windows
 - Microsoft OneNote desktop app
 - Python 3.11+
-- Node.js/npm if you want to launch it with `npx`
+- Node.js/npm for the recommended `npx` setup
 - Optional: OneMore, for Markdown-to-HTML conversion through its bundled
   Markdig parser
 
-## Install
+Check the required commands:
 
-### Option 1: run with npx
+```powershell
+node -v
+npm -v
+python --version
+# or: py -3 --version
+```
 
-This is the most familiar setup for many MCP clients:
+## Quick Start
+
+Add this server to your MCP client config:
+
+### Codex
 
 ```toml
 [mcp_servers.local-onenote]
@@ -44,16 +53,45 @@ LOCAL_ONENOTE_MCP_TIMEOUT = "90"
 LOCAL_ONENOTE_MCP_MAX_TEXT_CHARS = "60000"
 ```
 
-After the package is published to the npm registry, the `args` can be shortened
-to:
+### Claude Desktop-style JSON
+
+```json
+{
+  "mcpServers": {
+    "local-onenote": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "github:Peteroooooooo/local-onenote-mcp"
+      ],
+      "env": {
+        "LOCAL_ONENOTE_MCP_TIMEOUT": "90",
+        "LOCAL_ONENOTE_MCP_MAX_TEXT_CHARS": "60000"
+      }
+    }
+  }
+}
+```
+
+Restart the MCP client after changing the config. On first run, `npx` downloads
+this package from GitHub, creates a cached Python virtual environment, installs
+the bundled Python MCP server into that cache, and starts the stdio server.
+Later runs reuse the cache.
+
+Test it by asking your MCP client to run `local-onenote` `health_check`.
+
+After the package is published to the npm registry, replace the GitHub argument
+with the shorter package name:
 
 ```toml
 args = ["-y", "local-onenote-mcp"]
 ```
 
-The npm package is a thin launcher. On first run, it creates a cached Python
-virtual environment, installs the bundled Python MCP server into that cache,
-and then starts the MCP stdio server. Later runs reuse the cache.
+## Install Options
+
+### Option 1: run with npx
+
+This is the recommended setup for most users. Use the Quick Start config above.
 
 Set `LOCAL_ONENOTE_MCP_PYTHON` if Python is not on `PATH`:
 
