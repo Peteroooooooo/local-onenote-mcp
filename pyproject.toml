@@ -1,0 +1,35 @@
+[project]
+name = "local-onenote-mcp"
+version = "0.1.0"
+description = "Pure-local Microsoft OneNote MCP server backed by the Windows OneNote COM API."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "mcp>=1.26.0",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Office/Business",
+]
+
+[project.urls]
+Homepage = "https://github.com/Peteroooooooo/local-onenote-mcp"
+Issues = "https://github.com/Peteroooooooo/local-onenote-mcp/issues"
+
+[project.scripts]
+local-onenote-mcp = "local_onenote_mcp.server:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
