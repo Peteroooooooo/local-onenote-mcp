@@ -21,12 +21,59 @@ library unavailable to Python automation libraries.
 
 - Windows
 - Microsoft OneNote desktop app
-- Python 3.11+
-- `uv` or `pip`
+- Python 3.11+, or a Python runner such as `uv`/`pipx`
+- Optional: OneMore, for Markdown-to-HTML conversion through its bundled
+  Markdig parser
 
 ## Install
 
+### Option 1: run directly from GitHub with uvx
+
+This is the easiest setup for most MCP clients. It does not require cloning the
+repository.
+
+```toml
+[mcp_servers.local-onenote]
+type = "stdio"
+command = "uvx"
+args = [
+  "--from",
+  "git+https://github.com/Peteroooooooo/local-onenote-mcp",
+  "local-onenote-mcp"
+]
+startup_timeout_ms = 120000
+
+[mcp_servers.local-onenote.env]
+LOCAL_ONENOTE_MCP_TIMEOUT = "90"
+LOCAL_ONENOTE_MCP_MAX_TEXT_CHARS = "60000"
+```
+
+### Option 2: install once with pipx
+
 ```powershell
+pipx install git+https://github.com/Peteroooooooo/local-onenote-mcp
+```
+
+Then configure your MCP client to run the installed console script:
+
+```toml
+[mcp_servers.local-onenote]
+type = "stdio"
+command = "local-onenote-mcp"
+startup_timeout_ms = 120000
+
+[mcp_servers.local-onenote.env]
+LOCAL_ONENOTE_MCP_TIMEOUT = "90"
+LOCAL_ONENOTE_MCP_MAX_TEXT_CHARS = "60000"
+```
+
+If Windows cannot find `local-onenote-mcp`, run `pipx ensurepath`, restart the
+terminal/MCP client, or use the full path printed by `pipx list`.
+
+### Option 3: clone for development
+
+```powershell
+git clone https://github.com/Peteroooooooo/local-onenote-mcp
 cd local-onenote-mcp
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e .
@@ -34,7 +81,21 @@ python -m venv .venv
 
 ## Codex MCP Config
 
-Add an MCP server entry that runs the installed module:
+MCP stdio servers are launched as local processes. This project is written in
+Python, so the client must launch either a Python runner (`uvx`, `pipx`) or a
+Python executable/console script from an environment where the package is
+installed.
+
+For a development checkout, either run the console script:
+
+```toml
+[mcp_servers.local-onenote]
+type = "stdio"
+command = "C:\\path\\to\\local-onenote-mcp\\.venv\\Scripts\\local-onenote-mcp.exe"
+startup_timeout_ms = 120000
+```
+
+or run the module with that environment's Python:
 
 ```json
 {
@@ -54,11 +115,13 @@ Add an MCP server entry that runs the installed module:
 }
 ```
 
-Restart the MCP client after changing its config.
+Other MCP servers may appear not to need Python because they are launched via
+`npx`, `uvx`, Docker, or a packaged executable. The requirement is the same:
+the MCP client needs a command it can execute.
 
-Make sure `command` points to an existing Python executable inside the installed
-repository venv. If the path is stale, the MCP client will not expose the
-`local-onenote` tools.
+Restart the MCP client after changing its config. Make sure `command` points to
+an executable available to the MCP client process. If the path is stale, the MCP
+client will not expose the `local-onenote` tools.
 
 Validate the Codex config from this checkout:
 
