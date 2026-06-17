@@ -206,9 +206,32 @@ Validate the Codex config from this checkout:
 The check fails if Codex points at a missing Python executable or imports
 `local_onenote_mcp` from a different checkout.
 
-If OneMore is installed, the server can use OneMore's bundled Markdig parser
-for Markdown writes. The default path is detected from the OneMore registry
-entry. Override it with `LOCAL_ONENOTE_MARKDIG_DLL` when needed.
+## OneMore Markdown Support
+
+This server uses OneMore for Markdown conversion when writing page content with
+`content_format="markdown"` or `content_format="md"`. The supported tools are
+`create_page`, `append_to_page`, and `replace_page_body`.
+
+Only OneMore's bundled `Markdig.Signed.dll` parser is used. The server converts
+Markdown to HTML through Markdig's advanced extensions, then writes the result
+through the OneNote desktop COM API. Tables are emitted as native OneNote tables
+where possible.
+
+The Markdig DLL is detected from OneMore's registry entry, then from the default
+OneMore install paths:
+
+- `C:\Program Files\River\OneMoreAddIn\Markdig.Signed.dll`
+- `C:\Program Files (x86)\River\OneMoreAddIn\Markdig.Signed.dll`
+
+Set `LOCAL_ONENOTE_MARKDIG_DLL` when OneMore is installed somewhere else:
+
+```toml
+[mcp_servers.local-onenote.env]
+LOCAL_ONENOTE_MARKDIG_DLL = "C:\\path\\to\\Markdig.Signed.dll"
+```
+
+Other OneMore add-in commands are not called; hierarchy, page updates, export,
+navigation, and sync still go through the local OneNote COM API.
 
 ## Tools
 
