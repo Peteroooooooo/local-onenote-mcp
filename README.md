@@ -22,7 +22,7 @@ library unavailable to Python automation libraries.
 - Windows
 - Microsoft OneNote desktop app
 - Python 3.11+
-- Node.js/npm for the recommended `npx` setup
+- Node.js/npm for the recommended global npm setup
 - Optional: OneMore, for Markdown-to-HTML conversion through its bundled
   Markdig parser
 
@@ -37,15 +37,20 @@ python --version
 
 ## Quick Start
 
-Add this server to your MCP client config:
+Install the launcher once:
+
+```powershell
+npm install -g github:Peteroooooooo/local-onenote-mcp
+```
+
+Then add this server to your MCP client config:
 
 ### Codex
 
 ```toml
 [mcp_servers.local-onenote]
 type = "stdio"
-command = "npx"
-args = ["-y", "github:Peteroooooooo/local-onenote-mcp"]
+command = "local-onenote-mcp"
 startup_timeout_ms = 120000
 
 [mcp_servers.local-onenote.env]
@@ -59,11 +64,7 @@ LOCAL_ONENOTE_MCP_MAX_TEXT_CHARS = "60000"
 {
   "mcpServers": {
     "local-onenote": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "github:Peteroooooooo/local-onenote-mcp"
-      ],
+      "command": "local-onenote-mcp",
       "env": {
         "LOCAL_ONENOTE_MCP_TIMEOUT": "90",
         "LOCAL_ONENOTE_MCP_MAX_TEXT_CHARS": "60000"
@@ -73,25 +74,31 @@ LOCAL_ONENOTE_MCP_MAX_TEXT_CHARS = "60000"
 }
 ```
 
-Restart the MCP client after changing the config. On first run, `npx` downloads
-this package from GitHub, creates a cached Python virtual environment, installs
-the bundled Python MCP server into that cache, and starts the stdio server.
-Later runs reuse the cache.
+Restart the MCP client after changing the config. The global npm install is the
+only step that needs GitHub. On first MCP run, the launcher creates a cached
+Python virtual environment, installs the bundled Python MCP server into that
+cache, and starts the stdio server. Later MCP restarts reuse the cache and do
+not call GitHub.
 
 Test it by asking your MCP client to run `local-onenote` `health_check`.
 
-After the package is published to the npm registry, replace the GitHub argument
-with the shorter package name:
+After the package is published to the npm registry, install it with the shorter
+package name:
 
-```toml
-args = ["-y", "local-onenote-mcp"]
+```powershell
+npm install -g local-onenote-mcp
 ```
 
 ## Install Options
 
-### Option 1: run with npx
+### Option 1: install once with npm
 
 This is the recommended setup for most users. Use the Quick Start config above.
+Update manually when needed:
+
+```powershell
+npm install -g github:Peteroooooooo/local-onenote-mcp
+```
 
 Set `LOCAL_ONENOTE_MCP_PYTHON` if Python is not on `PATH`:
 
@@ -102,7 +109,25 @@ LOCAL_ONENOTE_MCP_TIMEOUT = "90"
 LOCAL_ONENOTE_MCP_MAX_TEXT_CHARS = "60000"
 ```
 
-### Option 2: run directly from GitHub with uvx
+### Option 2: run with npx
+
+This is convenient for quick testing, but it asks `npx` to resolve the GitHub
+package at MCP startup. If GitHub is slow or blocked, the MCP client can hang at
+server startup.
+
+```toml
+[mcp_servers.local-onenote]
+type = "stdio"
+command = "npx"
+args = ["-y", "github:Peteroooooooo/local-onenote-mcp"]
+startup_timeout_ms = 120000
+
+[mcp_servers.local-onenote.env]
+LOCAL_ONENOTE_MCP_TIMEOUT = "90"
+LOCAL_ONENOTE_MCP_MAX_TEXT_CHARS = "60000"
+```
+
+### Option 3: run directly from GitHub with uvx
 
 This does not require cloning the repository.
 
@@ -122,7 +147,7 @@ LOCAL_ONENOTE_MCP_TIMEOUT = "90"
 LOCAL_ONENOTE_MCP_MAX_TEXT_CHARS = "60000"
 ```
 
-### Option 3: install once with pipx
+### Option 4: install once with pipx
 
 ```powershell
 pipx install git+https://github.com/Peteroooooooo/local-onenote-mcp
@@ -144,7 +169,7 @@ LOCAL_ONENOTE_MCP_MAX_TEXT_CHARS = "60000"
 If Windows cannot find `local-onenote-mcp`, run `pipx ensurepath`, restart the
 terminal/MCP client, or use the full path printed by `pipx list`.
 
-### Option 4: clone for development
+### Option 5: clone for development
 
 ```powershell
 git clone https://github.com/Peteroooooooo/local-onenote-mcp

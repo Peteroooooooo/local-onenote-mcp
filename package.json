@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Pure-local Microsoft OneNote MCP server for Windows.",
   "license": "MIT",
+  "preferGlobal": true,
   "bin": {
     "local-onenote-mcp": "./bin/local-onenote-mcp.js"
   },
