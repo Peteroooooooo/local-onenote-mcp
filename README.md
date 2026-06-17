@@ -1,38 +1,49 @@
 # Local OneNote MCP
 
-A local Microsoft OneNote MCP server for Windows. It controls your OneNote desktop app directly through the local Windows COM API—**no Azure, Microsoft Graph, API keys, or internet-based OAuth required.** Everything stays 100% on your local machine.
+A high-performance, local Microsoft OneNote MCP server for Windows. It controls the OneNote desktop app directly through the local OneNote COM API—**requiring no Azure, Microsoft Graph, API keys, or online OAuth.**
 
-## Key Features
+---
 
-- **Local & Offline-First:** Operates directly on your locally installed OneNote desktop application.
-- **Rich Interaction:** Read pages, search notebook content, create new sections and pages, and append information.
-- **Exporting:** Convert and save OneNote pages directly to PDF.
-- **Multimedia Support:** Add local images directly to your OneNote pages.
-- **Markdown Support:** Built-in support for converting standard Markdown into native OneNote tables and formatting.
+## Design & Architecture
+
+- **Local-Only Boundary:** Every operation executes directly through the local OneNote desktop installation. No data ever leaves your computer.
+- **COM-First Engineering:** No direct binary `.one` file manipulation. All writes and reads leverage OneNote’s native COM engine, ensuring maximum data integrity and sync compatibility.
+- **Safe Execution Bridge:** Inputs are passed safely through JSON-based temp files, completely avoiding PowerShell string interpolation or risk of command injections.
+- **Rich Interaction Surface:** Full CRUD capabilities for notebooks, section groups, sections, pages, sync, and raw XML manipulation.
+
+> **Design Note:** PowerShell is leveraged as a reliable COM bridge because certain Windows/Office environments expose the OneNote COM interfaces directly to PowerShell while leaving them unavailable or restricted to Python's traditional automation libraries.
+
+---
 
 ## Requirements
 
-- **Windows**
-- **Microsoft OneNote** (Desktop app version, not the Windows 10 app)
+- **Windows 10 / 11**
+- **Microsoft OneNote Desktop App** (Traditional version; not the legacy Windows 10 UWP app)
 - **Python 3.11+**
-- **Node.js / npm** (For installation)
+- **Node.js & npm** (Required for the standard global launcher)
 
-## Quick Start
+Verify your system environment:
+```powershell
+node -v
+npm -v
+python --version
+```
 
-### 1. Install the Server
+---
 
-Open PowerShell and install the package globally:
+## Quick Start (Recommended)
 
+### 1. Install the global launcher
+Open PowerShell and run:
 ```powershell
 npm install -g github:Peteroooooooo/local-onenote-mcp
 ```
+*(Once published on the npm registry, you will be able to install it using: `npm install -g local-onenote-mcp`)*
 
-*(Once published to the npm registry, you will be able to install it via `npm install -g local-onenote-mcp`)*
+### 2. Configure your MCP Client
 
-### 2. Configure Claude Desktop
-
-Add the server to your Claude Desktop configuration file (located at `%APPDATA%\Claude\claude_desktop_config.json`):
-
+#### Claude Desktop
+Add this to your `%APPDATA%\Claude\claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
@@ -47,60 +58,179 @@ Add the server to your Claude Desktop configuration file (located at `%APPDATA%\
 }
 ```
 
-### 3. Restart your Client
+#### Codex / Cursor (TOML)
+Add this to your configuration:
+```toml
+[mcp_servers.local-onenote]
+type = "stdio"
+command = "local-onenote-mcp"
+startup_timeout_ms = 120000
 
-Restart Claude Desktop. The first time the server starts, it will automatically set up a local Python environment and prepare itself. 
+[mcp_servers.local-onenote.env]
+LOCAL_ONENOTE_MCP_TIMEOUT = "90"
+LOCAL_ONENOTE_MCP_MAX_TEXT_CHARS = "60000"
+```
 
----
-
-## Example Prompts (How to Use)
-
-Once configured, you can ask Claude to perform actions in OneNote using natural language:
-
-### List & Search
-- *"List all of my OneNote notebooks."*
-- *"Search my OneNote pages for 'Weekly Report'."*
-- *"What sections do I have in my 'Projects' notebook?"*
-
-### Create & Update Pages
-- *"Create a page titled 'Meeting Notes' in the 'General' section."*
-- *"Append this paragraph to my 'To-Do List' page: [insert text]."*
-- *"Create a table in a new page in my 'Work' notebook with columns for Task, Status, and Date."*
-
-### Images & Export
-- *"Add the image at 'C:\Users\User\Desktop\screenshot.png' to my current page."*
-- *"Export my 'Project Specification' page to a PDF file at 'C:\Users\User\Documents\Spec.pdf'."*
+*Restart your MCP client. Upon first execution, the launcher automatically creates a local Python virtual environment, installs the required packages, and hosts the stdio channel.*
 
 ---
 
-## Markdown Formatting Example
+## Alternative Installation Options
 
-The server supports standard Markdown formatting (including tables). You can ask Claude to create a page with a body like this:
+### Option A: Modern Python Toolchains (No npm required)
 
-```markdown
-# Weekly Team Sync
+If you prefer pure-Python execution, you can configure your MCP client to invoke the server via standard Python package runners.
 
-- **Date:** 2026-06-17
-- **Attendees:** Alice, Bob, Peter
+#### Using `uvx` (Ultra-fast, ephemeral execution)
+```toml
+[mcp_servers.local-onenote]
+type = "stdio"
+command = "uvx"
+args = [
+  "--from",
+  "git+https://github.com/Peteroooooooo/local-onenote-mcp",
+  "local-onenote-mcp"
+]
+startup_timeout_ms = 120000
+```
 
-## Key Takeaways
-- Q2 targets have been met successfully.
-- Code freeze is scheduled for next Thursday.
-
-## Action Items
-| Task | Owner | Status |
-| --- | --- | --- |
-| Update API documentation | Bob | In Progress |
-| Prepare release notes | Alice | Pending |
+#### Using `pipx` (Isolated user-space CLI)
+```powershell
+pipx install git+https://github.com/Peteroooooooo/local-onenote-mcp
+```
+Then configure:
+```toml
+[mcp_servers.local-onenote]
+type = "stdio"
+command = "local-onenote-mcp"
+startup_timeout_ms = 120000
 ```
 
 ---
 
-## Settings & Environment Variables
+### Option B: Local Cloning & Active Development
 
-If you need custom configurations, you can pass these environment variables in your configuration JSON:
+To contribute or run the server from source:
 
-- `LOCAL_ONENOTE_MCP_PYTHON`: Path to a specific Python executable if Python is not in your system `PATH` (e.g., `C:\\Python312\\python.exe`).
-- `LOCAL_ONENOTE_MCP_TIMEOUT`: Command timeout in seconds (Default: `90`).
-- `LOCAL_ONENOTE_MCP_MAX_TEXT_CHARS`: Maximum characters to read from a single page to prevent context overflow (Default: `60000`).
-- `LOCAL_ONENOTE_MARKDIG_DLL`: Path to custom `Markdig.Signed.dll` if you use the [OneMore](https://github.com/stevencohn/OneMore) add-in for Markdown-to-HTML parsing. (The server automatically detects standard OneMore installations).
+1. **Clone the repository:**
+   ```powershell
+   git clone https://github.com/Peteroooooooo/local-onenote-mcp
+   cd local-onenote-mcp
+   ```
+2. **Build the Python Virtual Environment:**
+   ```powershell
+   python -m venv .venv
+   .\.venv\Scripts\python.exe -m pip install -e .
+   ```
+3. **Configure your Client to use the local dev build:**
+   ```json
+   {
+     "mcpServers": {
+       "local-onenote-dev": {
+         "command": "C:\\path\\to\\local-onenote-mcp\\.venv\\Scripts\\python.exe",
+         "args": ["-m", "local_onenote_mcp.server"],
+         "env": {
+           "LOCAL_ONENOTE_MCP_TIMEOUT": "90",
+           "LOCAL_ONENOTE_MCP_MAX_TEXT_CHARS": "60000"
+         }
+       }
+     }
+   }
+   ```
+4. **Validate local configurations:**
+   ```powershell
+   .\.venv\Scripts\python.exe scripts\check_codex_config.py
+   ```
+
+---
+
+## OneMore & Markdown Integration
+
+The server provides seamless integration with the [OneMore](https://github.com/stevencohn/OneMore) desktop add-in to power Markdown-to-HTML compilation when invoking `create_page`, `append_to_page`, or `replace_page_body` with `content_format="markdown"`.
+
+It queries and binds directly to OneMore's native `Markdig.Signed.dll` via the Windows Registry or standard program paths:
+- `C:\Program Files\River\OneMoreAddIn\Markdig.Signed.dll`
+- `C:\Program Files (x86)\River\OneMoreAddIn\Markdig.Signed.dll`
+
+If installed in a custom location, specify the path in your configuration variables:
+```toml
+[mcp_servers.local-onenote.env]
+LOCAL_ONENOTE_MARKDIG_DLL = "C:\\path\\to\\Markdig.Signed.dll"
+```
+
+---
+
+## API & Tool Directory
+
+The server exposes 30+ comprehensive endpoints grouped into four logical categories:
+
+### 1. Discovery & Content Inspection
+* `health_check`: Get server version, python location, and active features.
+* `list_notebooks` / `list_sections` / `list_pages` / `list_hierarchy`: Traverse the live OneNote structure.
+* `get_page` / `get_page_text` / `get_page_xml`: Extract page content as plain text, parsed JSON, or raw XML.
+* `get_page_objects` / `get_binary_content`: Query and extract sub-elements (like tables, images, ink, or file attachment payloads).
+* `search_pages`: Search live text. Supports real-time offline scan (`include_unindexed=true`) or indexing searches.
+
+### 2. Creation & Structural Edits
+* `open_hierarchy` / `create_notebook` / `create_section` / `create_section_group`
+* `create_page`: Create formatted pages via `plain`, `html`, or `markdown`.
+* `update_page_title` / `append_to_page` / `replace_page_body`
+* `add_image_to_page`: Add local images. Automatically infers native dimensions if only width or height is provided.
+
+### 3. File & App Control
+* `publish_object`: Export any notebook, section, or page to local PDF files.
+* `navigate_to` / `navigate_to_url`: Instantly focus and jump the desktop UI to specific elements.
+* `sync_hierarchy`: Trigger background or immediate synchronization of specific notebooks.
+* `close_notebook` / `merge_sections` / `set_filing_location`
+
+### 4. Raw Low-Level Control
+* `update_page_xml` / `update_hierarchy_xml`: Execute direct, high-performance edits on OneNote's raw underlying XML schemas.
+
+> **Identifier Resolution Protocol:** 
+> When querying folders or items, the server sequentially tries to resolve identifiers in this priority:
+> 1. Exact OneNote Object GUID (Recommended for automation)
+> 2. Relative Hierarchy Path (e.g., `Personal/Quick Notes/My Section`)
+> 3. Unique display name
+
+---
+
+## Verification & Smoke Tests
+
+Ensure everything is configured and operating as expected before starting:
+
+```powershell
+# 1. Run a read-only discovery verification
+.\.venv\Scripts\python.exe scripts\smoke_mcp.py
+
+# 2. Run a full write/read/search verification cycle
+.\.venv\Scripts\python.exe scripts\smoke_mcp.py --notebook "MyNotebook" --section "MyNotebook/General" --export-dir tmp
+```
+
+---
+
+## Prompt Engineering & Markdown Example
+
+Here is a typical markdown format that can be generated dynamically:
+
+```markdown
+# Project Launch Checklist
+
+- **Project:** Triton Migration
+- **Target Date:** 2026-07-01
+
+## Immediate Tasks
+- Define system architecture layout.
+- Finalize local security boundary reviews.
+
+## Roadmap & Milestones
+| Milestone | Responsibility | Status |
+| --- | --- | --- |
+| Beta Deploy | Infrastructure | **In Progress** |
+| Production Cutover | Operations | Pending |
+```
+
+---
+
+## Limits & Boundaries
+
+This server relies on the Windows COM API. While it excels at handling local/offline notebooks with speeds exceeding the Microsoft Graph Cloud API, it is restricted to single-user local contexts and Windows-native environments.
