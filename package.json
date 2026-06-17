@@ -1,0 +1,35 @@
+{
+  "name": "local-onenote-mcp",
+  "version": "0.1.0",
+  "description": "Pure-local Microsoft OneNote MCP server for Windows.",
+  "license": "MIT",
+  "bin": {
+    "local-onenote-mcp": "./bin/local-onenote-mcp.js"
+  },
+  "files": [
+    "bin/",
+    "src/local_onenote_mcp/*.py",
+    "pyproject.toml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "onenote",
+    "microsoft-onenote",
+    "codex",
+    "claude"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Peteroooooooo/local-onenote-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Peteroooooooo/local-onenote-mcp/issues"
+  },
+  "homepage": "https://github.com/Peteroooooooo/local-onenote-mcp#readme",
+  "engines": {
+    "node": ">=18"
+  }
+}
