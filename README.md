@@ -21,16 +21,52 @@ library unavailable to Python automation libraries.
 
 - Windows
 - Microsoft OneNote desktop app
-- Python 3.11+, or a Python runner such as `uv`/`pipx`
+- Python 3.11+
+- Node.js/npm if you want to launch it with `npx`
 - Optional: OneMore, for Markdown-to-HTML conversion through its bundled
   Markdig parser
 
 ## Install
 
-### Option 1: run directly from GitHub with uvx
+### Option 1: run with npx
 
-This is the easiest setup for most MCP clients. It does not require cloning the
-repository.
+This is the most familiar setup for many MCP clients:
+
+```toml
+[mcp_servers.local-onenote]
+type = "stdio"
+command = "npx"
+args = ["-y", "github:Peteroooooooo/local-onenote-mcp"]
+startup_timeout_ms = 120000
+
+[mcp_servers.local-onenote.env]
+LOCAL_ONENOTE_MCP_TIMEOUT = "90"
+LOCAL_ONENOTE_MCP_MAX_TEXT_CHARS = "60000"
+```
+
+After the package is published to the npm registry, the `args` can be shortened
+to:
+
+```toml
+args = ["-y", "local-onenote-mcp"]
+```
+
+The npm package is a thin launcher. On first run, it creates a cached Python
+virtual environment, installs the bundled Python MCP server into that cache,
+and then starts the MCP stdio server. Later runs reuse the cache.
+
+Set `LOCAL_ONENOTE_MCP_PYTHON` if Python is not on `PATH`:
+
+```toml
+[mcp_servers.local-onenote.env]
+LOCAL_ONENOTE_MCP_PYTHON = "C:\\path\\to\\python.exe"
+LOCAL_ONENOTE_MCP_TIMEOUT = "90"
+LOCAL_ONENOTE_MCP_MAX_TEXT_CHARS = "60000"
+```
+
+### Option 2: run directly from GitHub with uvx
+
+This does not require cloning the repository.
 
 ```toml
 [mcp_servers.local-onenote]
@@ -48,7 +84,7 @@ LOCAL_ONENOTE_MCP_TIMEOUT = "90"
 LOCAL_ONENOTE_MCP_MAX_TEXT_CHARS = "60000"
 ```
 
-### Option 2: install once with pipx
+### Option 3: install once with pipx
 
 ```powershell
 pipx install git+https://github.com/Peteroooooooo/local-onenote-mcp
@@ -70,7 +106,7 @@ LOCAL_ONENOTE_MCP_MAX_TEXT_CHARS = "60000"
 If Windows cannot find `local-onenote-mcp`, run `pipx ensurepath`, restart the
 terminal/MCP client, or use the full path printed by `pipx list`.
 
-### Option 3: clone for development
+### Option 4: clone for development
 
 ```powershell
 git clone https://github.com/Peteroooooooo/local-onenote-mcp
@@ -81,10 +117,10 @@ python -m venv .venv
 
 ## Codex MCP Config
 
-MCP stdio servers are launched as local processes. This project is written in
-Python, so the client must launch either a Python runner (`uvx`, `pipx`) or a
-Python executable/console script from an environment where the package is
-installed.
+MCP stdio servers are launched as local processes. This project is implemented
+in Python and also ships an npm launcher, so the client can launch it with
+`npx`, `uvx`, `pipx`, or a Python executable/console script from an environment
+where the package is installed.
 
 For a development checkout, either run the console script:
 
