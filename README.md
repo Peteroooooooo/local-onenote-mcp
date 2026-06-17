@@ -21,6 +21,7 @@ A high-performance, local Microsoft OneNote MCP server for Windows. It controls 
 - **Microsoft OneNote Desktop App** (Traditional version; not the legacy Windows 10 UWP app)
 - **Python 3.11+**
 - **Node.js & npm** (Required for the standard global launcher)
+- **OneMore Desktop Add-in** *(Optional — only required to enable rich Markdown compilation)*
 
 Verify your system environment:
 ```powershell
@@ -146,9 +147,11 @@ To contribute or run the server from source:
 
 ## OneMore & Markdown Integration
 
-The server provides seamless integration with the [OneMore](https://github.com/stevencohn/OneMore) desktop add-in to power Markdown-to-HTML compilation when invoking `create_page`, `append_to_page`, or `replace_page_body` with `content_format="markdown"`.
+> 💡 **Crucial Note on Optionality & Power:**
+> - **100% Optional:** The [OneMore](https://github.com/stevencohn/OneMore) desktop add-in is **not** a hard dependency. Without it, the server operates fully, allowing complete notebook hierarchy discovery, search, page reads, exports, navigation, and page creation/modification using plain text or raw HTML.
+> - **A Formatting Powerhouse:** If installed, it unlocks a massive productivity boost. It binds to OneMore's high-performance `.NET Markdig` rendering pipeline. This lets AI agents write in **standard, clean Markdown** (including bold, italics, code snippets with styling, bulleted/numbered lists, headers, and blockquotes) and automatically converts them into **perfectly formatted, native OneNote components and structured tables**.
 
-It queries and binds directly to OneMore's native `Markdig.Signed.dll` via the Windows Registry or standard program paths:
+The server achieves this by querying and binding directly to OneMore's native `Markdig.Signed.dll` via the Windows Registry or standard program paths:
 - `C:\Program Files\River\OneMoreAddIn\Markdig.Signed.dll`
 - `C:\Program Files (x86)\River\OneMoreAddIn\Markdig.Signed.dll`
 
