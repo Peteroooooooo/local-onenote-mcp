@@ -52,7 +52,31 @@ function pythonCandidates() {
 }
 
 function findPython() {
+  const root = cacheRoot();
+  const cacheFile = path.join(root, "detected-python.json");
   const probe = "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')";
+
+  if (fs.existsSync(cacheFile)) {
+    try {
+      const cached = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
+      if (cached && cached.command) {
+        const result = spawnSync(cached.command, [...(cached.args || []), "-c", probe], {
+          encoding: "utf8",
+          windowsHide: true,
+          timeout: 2000,
+        });
+        if (result.status === 0) {
+          const version = (result.stdout || "").trim().split(".").map((part) => Number(part));
+          if (version[0] > 3 || (version[0] === 3 && version[1] >= 11)) {
+            return cached;
+          }
+        }
+      }
+    } catch (e) {
+      // Ignore cache read errors
+    }
+  }
+
   const errors = [];
   for (const candidate of pythonCandidates()) {
     const result = spawnSync(candidate.command, [...candidate.args, "-c", probe], {
@@ -66,6 +90,12 @@ function findPython() {
     }
     const version = (result.stdout || "").trim().split(".").map((part) => Number(part));
     if (version[0] > 3 || (version[0] === 3 && version[1] >= 11)) {
+      try {
+        fs.mkdirSync(root, { recursive: true });
+        fs.writeFileSync(cacheFile, JSON.stringify(candidate, null, 2), "utf8");
+      } catch (e) {
+        // Ignore cache write errors
+      }
       return candidate;
     }
     errors.push(`${candidate.command} ${candidate.args.join(" ")} found Python ${version.join(".")}, need >=3.11`.trim());
