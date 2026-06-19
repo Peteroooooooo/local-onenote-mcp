@@ -41,6 +41,8 @@ npm install -g github:Peteroooooooo/local-onenote-mcp
 ```
 *(Once published on the npm registry, you will be able to install it using: `npm install -g local-onenote-mcp`)*
 
+> ? **Performance & Startup Tip:** Running this server via a global installation (`npm install -g`) or direct local link is highly recommended over running it dynamically via ephemeral `npx` commands. This ensures the server operates 100% offline, resolves real physical paths consistently, caches the underlying Python virtual environment perfectly, and boots in under 1 second by avoiding slow GitHub network requests and redundant package reinstalls on startup.
+
 ### 2. Configure your MCP Client
 
 #### Claude Desktop

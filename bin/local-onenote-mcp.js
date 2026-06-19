@@ -6,7 +6,7 @@ const os = require("os");
 const path = require("path");
 const { spawn, spawnSync } = require("child_process");
 
-const packageRoot = path.resolve(__dirname, "..");
+const packageRoot = fs.realpathSync(path.resolve(__dirname, ".."));
 const packageJson = require(path.join(packageRoot, "package.json"));
 const markerName = `.installed-${packageJson.version}`;
 const markerPayload = JSON.stringify(
