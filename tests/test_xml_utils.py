@@ -81,18 +81,20 @@ def test_html_table_cells_preserve_inline_formatting():
     assert 'href="https://example.com"' in xml
 
 
-def test_markdown_content_uses_onemore_markdig_html(monkeypatch):
+def test_markdown_content_converts_rendered_html(monkeypatch):
     monkeypatch.setattr(
         xml_utils,
         "markdown_to_html",
         lambda content: "<h1>Heading</h1><table><thead><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td>1</td><td><strong>2</strong></td></tr></tbody></table>",
     )
 
-    xml = build_page_update_xml("page-id", content="# Heading", content_format="markdown")
+    native = build_page_update_xml("page-id", content="# Heading", content_format="markdown")
+    inline = build_page_update_xml("page-id", content="# Heading", content_format="markdown", native_styles=False)
 
-    assert "<![CDATA[<span style=\"font-size:20.0pt;font-weight:bold\">Heading</span>]]>" in xml
-    assert "<one:Table" in xml
-    assert "<![CDATA[<strong>2</strong>]]>" in xml
+    assert '<one:OE quickStyleIndex="1"><one:T><![CDATA[Heading]]>' in native
+    assert "<![CDATA[<span style=\"font-size:20.0pt;font-weight:bold\">Heading</span>]]>" in inline
+    assert "<one:Table" in native
+    assert "<![CDATA[<strong>2</strong>]]>" in native
 
 
 def test_build_image_xml_omits_size_when_dimensions_are_missing():

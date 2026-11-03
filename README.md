@@ -1,17 +1,18 @@
 # Local OneNote MCP
 
-A high-performance, local Microsoft OneNote MCP server for Windows. It controls the OneNote desktop app directly through the local OneNote COM API—**requiring no Azure, Microsoft Graph, API keys, or online OAuth.**
+A local Microsoft OneNote MCP server for Windows. It controls the OneNote desktop app directly through the local OneNote COM API—**requiring no Azure, Microsoft Graph, API keys, or online OAuth.**
 
 ---
 
 ## Design & Architecture
 
-- **Local-Only Boundary:** Every operation executes directly through the local OneNote desktop installation. No data ever leaves your computer.
-- **COM-First Engineering:** No direct binary `.one` file manipulation. All writes and reads leverage OneNote’s native COM engine, ensuring maximum data integrity and sync compatibility.
-- **Safe Execution Bridge:** Inputs are passed safely through JSON-based temp files, completely avoiding PowerShell string interpolation or risk of command injections.
-- **Rich Interaction Surface:** Full CRUD capabilities for notebooks, section groups, sections, pages, sync, and raw XML manipulation.
+- **Local-Only Boundary:** Every operation executes directly through the local OneNote desktop installation. No data leaves your computer.
+- **COM-First Engineering:** No direct binary `.one` file manipulation. All writes and reads go through OneNote's own COM engine, so sync and integrity stay OneNote's job.
+- **Persistent, Injection-Free Bridge:** One long-lived PowerShell process runs a fixed script and receives each request as a JSON line. User data is never interpolated into script text. Keeping the process (and its COM connection) alive makes a typical page read take tens of milliseconds instead of about a second.
+- **Native Formatting:** Markdown and HTML become native OneNote headings, bullet/numbered lists (nested), To Do checkboxes, tables and code blocks. Pages read back as plain text or Markdown, including the text OneNote recognised inside images (OCR).
+- **Local Full-Text Index:** Page text (with OCR) is cached per page and refreshed when OneNote reports the page changed, so searching thousands of pages takes well under a second once the index is built.
 
-> **Design Note:** PowerShell is leveraged as a reliable COM bridge because certain Windows/Office environments expose the OneNote COM interfaces directly to PowerShell while leaving them unavailable or restricted to Python's traditional automation libraries.
+> **Design Note:** PowerShell is used as the COM bridge because Python automation libraries (pywin32) cannot build a dispatch wrapper for `OneNote.Application`, while PowerShell can call it directly.
 
 ---
 
@@ -20,116 +21,28 @@ A high-performance, local Microsoft OneNote MCP server for Windows. It controls 
 - **Windows 10 / 11**
 - **Microsoft OneNote Desktop App** (Traditional version; not the legacy Windows 10 UWP app)
 - **Python 3.11+**
-- **Node.js & npm** (Required for the standard global launcher)
-- **OneMore Desktop Add-in** *(Optional — only required to enable rich Markdown compilation)*
-
-Verify your system environment:
-```powershell
-node -v
-npm -v
-python --version
-```
 
 ---
 
-## Quick Start (Recommended)
+## Setup (local folder)
 
-### 1. Install the global launcher
-Open PowerShell and run:
-```powershell
-npm install -g github:Peteroooooooo/local-onenote-mcp
-```
-*(Once published on the npm registry, you will be able to install it using: `npm install -g local-onenote-mcp`)*
-
-> ? **Performance & Startup Tip:** Running this server via a global installation (`npm install -g`) or direct local link is highly recommended over running it dynamically via ephemeral `npx` commands. This ensures the server operates 100% offline, resolves real physical paths consistently, caches the underlying Python virtual environment perfectly, and boots in under 1 second by avoiding slow GitHub network requests and redundant package reinstalls on startup.
-
-### 2. Configure your MCP Client
-
-#### Claude Desktop
-Add this to your `%APPDATA%\Claude\claude_desktop_config.json`:
-```json
-{
-  "mcpServers": {
-    "local-onenote": {
-      "command": "local-onenote-mcp",
-      "env": {
-        "LOCAL_ONENOTE_MCP_TIMEOUT": "90",
-        "LOCAL_ONENOTE_MCP_MAX_TEXT_CHARS": "60000"
-      }
-    }
-  }
-}
-```
-
-#### Codex / Cursor (TOML)
-Add this to your configuration:
-```toml
-[mcp_servers.local-onenote]
-type = "stdio"
-command = "local-onenote-mcp"
-startup_timeout_ms = 120000
-
-[mcp_servers.local-onenote.env]
-LOCAL_ONENOTE_MCP_TIMEOUT = "90"
-LOCAL_ONENOTE_MCP_MAX_TEXT_CHARS = "60000"
-```
-
-*Restart your MCP client. Upon first execution, the launcher automatically creates a local Python virtual environment, installs the required packages, and hosts the stdio channel.*
-
----
-
-## Alternative Installation Options
-
-### Option A: Modern Python Toolchains (No npm required)
-
-If you prefer pure-Python execution, you can configure your MCP client to invoke the server via standard Python package runners.
-
-#### Using `uvx` (Ultra-fast, ephemeral execution)
-```toml
-[mcp_servers.local-onenote]
-type = "stdio"
-command = "uvx"
-args = [
-  "--from",
-  "git+https://github.com/Peteroooooooo/local-onenote-mcp",
-  "local-onenote-mcp"
-]
-startup_timeout_ms = 120000
-```
-
-#### Using `pipx` (Isolated user-space CLI)
-```powershell
-pipx install git+https://github.com/Peteroooooooo/local-onenote-mcp
-```
-Then configure:
-```toml
-[mcp_servers.local-onenote]
-type = "stdio"
-command = "local-onenote-mcp"
-startup_timeout_ms = 120000
-```
-
----
-
-### Option B: Local Cloning & Active Development
-
-To contribute or run the server from source:
-
-1. **Clone the repository:**
+1. **Clone the repository and create its virtual environment:**
    ```powershell
    git clone https://github.com/Peteroooooooo/local-onenote-mcp
    cd local-onenote-mcp
-   ```
-2. **Build the Python Virtual Environment:**
-   ```powershell
    python -m venv .venv
    .\.venv\Scripts\python.exe -m pip install -e .
    ```
-3. **Configure your Client to use the local dev build:**
+   The editable install means a `git pull` or local edit takes effect the next time the MCP client starts the server.
+
+2. **Point your MCP client at the folder's Python.** Replace the path with your clone.
+
+   Claude Code / Claude Desktop (JSON):
    ```json
    {
      "mcpServers": {
-       "local-onenote-dev": {
+       "local-onenote": {
+         "type": "stdio",
          "command": "C:\\path\\to\\local-onenote-mcp\\.venv\\Scripts\\python.exe",
          "args": ["-m", "local_onenote_mcp.server"],
          "env": {
@@ -140,102 +53,132 @@ To contribute or run the server from source:
      }
    }
    ```
-4. **Validate local configurations:**
-   ```powershell
-   .\.venv\Scripts\python.exe scripts\check_codex_config.py
+
+   Codex (TOML; use forward slashes or doubled backslashes):
+   ```toml
+   [mcp_servers.local-onenote]
+   type = "stdio"
+   command = "C:/path/to/local-onenote-mcp/.venv/Scripts/python.exe"
+   args = ["-m", "local_onenote_mcp.server"]
+   startup_timeout_ms = 30000
    ```
 
----
+3. **Check it:**
+   ```powershell
+   .\.venv\Scripts\python.exe scripts\check_codex_config.py   # Codex config points at this folder
+   .\.venv\Scripts\python.exe scripts\smoke_mcp.py            # read-only check against your OneNote
+   ```
 
-## OneMore & Markdown Integration
+Starting the server does not start OneNote. OneNote is contacted on the first tool call.
 
-> 💡 **Crucial Note on Optionality & Power:**
-> - **100% Optional:** The [OneMore](https://github.com/stevencohn/OneMore) desktop add-in is **not** a hard dependency. Without it, the server operates fully, allowing complete notebook hierarchy discovery, search, page reads, exports, navigation, and page creation/modification using plain text or raw HTML.
-> - **A Formatting Powerhouse:** If installed, it unlocks a massive productivity boost. It binds to OneMore's high-performance `.NET Markdig` rendering pipeline. This lets AI agents write in **standard, clean Markdown** (including bold, italics, code snippets with styling, bulleted/numbered lists, headers, and blockquotes) and automatically converts them into **perfectly formatted, native OneNote components and structured tables**.
-
-The server achieves this by querying and binding directly to OneMore's native `Markdig.Signed.dll` via the Windows Registry or standard program paths:
-- `C:\Program Files\River\OneMoreAddIn\Markdig.Signed.dll`
-- `C:\Program Files (x86)\River\OneMoreAddIn\Markdig.Signed.dll`
-
-If installed in a custom location, specify the path in your configuration variables:
-```toml
-[mcp_servers.local-onenote.env]
-LOCAL_ONENOTE_MARKDIG_DLL = "C:\\path\\to\\Markdig.Signed.dll"
-```
+> The repository also contains an npm launcher (`bin/local-onenote-mcp.js`) that builds its own cached virtual environment. It is optional; the local-folder setup above is the supported path.
 
 ---
 
-## API & Tool Directory
+## Markdown, HTML & Reading Formats
 
-The server exposes 30+ comprehensive endpoints grouped into four logical categories:
+Write tools (`create_page`, `append_to_page`, `replace_page_body`) accept `content_format` = `plain`, `html`, or `markdown`. Markdown is parsed with the bundled `markdown-it-py` (CommonMark plus tables and strikethrough). It becomes:
 
-### 1. Discovery & Content Inspection
-* `health_check`: Get server version, python location, and active features.
-* `list_notebooks` / `list_sections` / `list_pages` / `list_hierarchy`: Traverse the live OneNote structure.
-* `get_page` / `get_page_text` / `get_page_xml`: Extract page content as plain text, parsed JSON, or raw XML.
-* `get_page_objects` / `get_binary_content`: Query and extract sub-elements (like tables, images, ink, or file attachment payloads).
-* `search_pages`: Search live text. Supports real-time offline scan (`include_unindexed=true`) or indexing searches.
+| Markdown / HTML | In OneNote |
+| --- | --- |
+| `#` … `######` headings | OneNote Heading 1–6 styles |
+| `-` / `1.` lists, nested lists | Native bullet / numbered lists with indentation |
+| `- [ ]` / `- [x]` | Native To Do tags you can tick in OneNote |
+| `>` quotes | OneNote quote style |
+| Tables | Native OneNote tables with a shaded header row |
+| Fenced code | OneNote code style, one line per paragraph, indentation kept |
+| `**bold**`, `*italic*`, `~~strike~~`, `` `code` ``, links | Inline formatting (`http`, `https`, `mailto`, `onenote` links only) |
 
-### 2. Creation & Structural Edits
+`append_to_page` and `add_image_to_page` place the new block below the page's existing content unless you pass `x`/`y`.
+
+`get_page` takes `format` = `text` or `markdown` and `include_ocr` (default `true`). Markdown read-back maps the same structures back (headings, lists, `- [x]` to-dos, tables, code fences, image OCR text as quotes).
+
+---
+
+## Tool Directory
+
+Each tool is annotated as read-only, writing, or destructive, so MCP clients can auto-approve reads and ask before deletes. Failures are returned as MCP tool errors (`isError: true`) with the reason.
+
+### 1. Discovery & Reading
+* `health_check`: Server version, Python location, feature list, and text-index progress.
+* `resolve_identifier`: Turn an ID, path, or name into one live object.
+* `list_notebooks` / `list_sections` / `list_pages` / `list_hierarchy`: Traverse the live OneNote structure. `list_hierarchy` returns at most `max_items` (default 500) and reports `total` / `truncated`.
+* `get_page`: Title and body as text or Markdown. `include_objects=true` lists outlines, images, ink and attachments with `object_id` and `callback_id`; `include_xml=true` adds the raw page XML.
+* `get_page_image`: Return an image from a page as MCP image content, so the model can look at it.
+* `get_binary_content`: Download an image or attached file as base64.
+* `search_pages`: Pages containing every word of the query, ranked (title matches first, then number of occurrences in the body).
+* `find_meta`, `get_hyperlink`, `get_special_locations`
+
+### 2. Creation & Edits
 * `open_hierarchy` / `create_notebook` / `create_section` / `create_section_group`
-* `create_page`: Create formatted pages via `plain`, `html`, or `markdown`.
-* `update_page_title` / `append_to_page` / `replace_page_body`
-* `add_image_to_page`: Add local images. Automatically infers native dimensions if only width or height is provided.
+* `create_page`, `update_page_title`, `append_to_page`, `add_image_to_page`
+* `replace_page_body`: Writes the new body first, then removes the old objects, so a failed write never empties the page.
+* `delete_page_content`, `delete_hierarchy` (pages are always matched by ID, so a page with a duplicate title is never touched)
 
-### 3. File & App Control
-* `publish_object`: Export any notebook, section, or page to local PDF files.
-* `navigate_to` / `navigate_to_url`: Instantly focus and jump the desktop UI to specific elements.
-* `sync_hierarchy`: Trigger background or immediate synchronization of specific notebooks.
-* `close_notebook` / `merge_sections` / `set_filing_location`
+### 3. Moving & Organizing
+* `move_page`: Move a page to another section in any notebook, or reorder it inside its section (`after_page_identifier`, `to_top`, or end). Subpages move with it unless `include_subpages=false`. A page moved to another section gets a new ID; the tool returns old and new IDs.
+* `set_page_level`: Make a page a subpage (level 2 or 3) or promote it back to level 1.
+* `move_section`: Move a section or section group into a notebook or section group in any notebook, or reorder it among its siblings. IDs are kept. For local notebooks it waits until OneNote has moved the `.one` file on disk, so the move survives closing the notebook.
+* `rename_section`: Rename a section or section group (pages are renamed with `update_page_title`).
+* `merge_sections`: Merge one section into another.
 
-### 4. Raw Low-Level Control
-* `update_page_xml` / `update_hierarchy_xml`: Execute direct, high-performance edits on OneNote's raw underlying XML schemas.
+All of these refuse to touch the recycle bin, and the section tools refuse name clashes and moving a group into itself.
 
-> **Identifier Resolution Protocol:** 
-> When querying folders or items, the server sequentially tries to resolve identifiers in this priority:
-> 1. Exact OneNote Object GUID (Recommended for automation)
-> 2. Relative Hierarchy Path (e.g., `Personal/Quick Notes/My Section`)
+### 4. File & App Control
+* `publish_object`: Export a notebook, section, or page to PDF, XPS, Word, MHT, HTML, EMF, or OneNote package files.
+* `navigate_to` / `navigate_to_url`, `sync_hierarchy`, `close_notebook`, `set_filing_location`
+
+### 5. Raw Low-Level Control
+* `update_page_xml` / `update_hierarchy_xml`: Submit raw OneNote XML to `UpdatePageContent` / `UpdateHierarchy`.
+
+> **Identifier Resolution:** identifiers are tried as
+> 1. OneNote object ID (fastest; the only safe choice for pages, because page titles are often duplicated)
+> 2. Hierarchy path (e.g., `Personal/Quick Notes/My Section`)
 > 3. Unique display name
 
+### How search works
+
+`search_pages` with the default `backend="auto"`:
+
+1. If the local text index covers the pages in scope, it answers from the index: complete, includes image OCR, about 50 ms for 4,800 pages. Pages edited since they were indexed are re-read on the spot.
+2. Otherwise it asks OneNote's own search index, and falls back to scanning page text (time-limited, reports `scan_complete`) when that finds nothing.
+
+The index fills itself in the background after the first tool call and keeps up by re-reading only pages whose `lastModifiedTime` changed. Progress is shown in `health_check` → `text_index`. `backend="local_scan"` forces the scan; `backend="index"` uses only OneNote's index.
+
+The index is stored at `%LOCALAPPDATA%\local-onenote-mcp\text-index.sqlite3` and contains the plain text of your pages. Delete the file to reset it, or set `LOCAL_ONENOTE_MCP_INDEX=0` to keep it in memory only.
+
+### Environment Variables
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `LOCAL_ONENOTE_MCP_TIMEOUT` | `90` | Seconds before a single COM call is abandoned and the bridge restarted |
+| `LOCAL_ONENOTE_MCP_MAX_TEXT_CHARS` | `60000` | Default cap on returned page text |
+| `LOCAL_ONENOTE_MCP_SCAN_SECONDS` | `60` | Time budget for a text-scan search |
+| `LOCAL_ONENOTE_MCP_HIERARCHY_CACHE_SECONDS` | `5` | How long a hierarchy listing is reused between tool calls (cleared after any write; `0` disables) |
+| `LOCAL_ONENOTE_MCP_INDEX` | `1` | `0` keeps the text index in memory only (nothing written to disk) |
+| `LOCAL_ONENOTE_MCP_INDEX_PATH` | | Custom location for the text index file |
+| `LOCAL_ONENOTE_MCP_BACKGROUND_INDEX` | `1` | `0` stops the background indexer; pages are then indexed only when a search reads them |
+| `LOCAL_ONENOTE_MCP_INDEX_REFRESH_SECONDS` | `120` | Minimum gap between background passes that pick up edited pages |
+
 ---
 
-## Verification & Smoke Tests
-
-Ensure everything is configured and operating as expected before starting:
+## Tests
 
 ```powershell
-# 1. Run a read-only discovery verification
+# Unit tests (no OneNote needed except one bridge test that only starts PowerShell)
+.\.venv\Scripts\python.exe -m pytest -q
+
+# Read-only check against your OneNote
 .\.venv\Scripts\python.exe scripts\smoke_mcp.py
 
-# 2. Run a full write/read/search verification cycle
-.\.venv\Scripts\python.exe scripts\smoke_mcp.py --notebook "MyNotebook" --section "MyNotebook/General" --export-dir tmp
+# Full write/read/search/image/move/delete cycle in throwaway notebooks (temp folder, closed afterwards)
+.\.venv\Scripts\python.exe scripts\e2e_onenote.py
 ```
 
----
-
-## Prompt Engineering & Markdown Example
-
-Here is a typical markdown format that can be generated dynamically:
-
-```markdown
-# Project Launch Checklist
-
-- **Project:** Triton Migration
-- **Target Date:** 2026-07-01
-
-## Immediate Tasks
-- Define system architecture layout.
-- Finalize local security boundary reviews.
-
-## Roadmap & Milestones
-| Milestone | Responsibility | Status |
-| --- | --- | --- |
-| Beta Deploy | Infrastructure | **In Progress** |
-| Production Cutover | Operations | Pending |
-```
+`e2e_onenote.py` runs 20 checks, including moving pages and sections between two notebooks and confirming the result after closing and reopening them. It also exports its test page to PDF and prints the folder, so formatting can be checked by eye.
 
 ---
 
 ## Limits & Boundaries
 
-This server relies on the Windows COM API. While it excels at handling local/offline notebooks with speeds exceeding the Microsoft Graph Cloud API, it is restricted to single-user local contexts and Windows-native environments.
+This server relies on the Windows COM API, so it runs only on Windows, for the signed-in local user, with the OneNote desktop app installed. COM calls are serialized through one bridge process; a tool call waits for at most one background-index page read. OneNote's own search index can lag behind very recent edits, which is why `search_pages` falls back to a text scan.

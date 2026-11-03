@@ -1,6 +1,6 @@
 {
   "name": "local-onenote-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Pure-local Microsoft OneNote MCP server for Windows.",
   "license": "MIT",
   "preferGlobal": true,
