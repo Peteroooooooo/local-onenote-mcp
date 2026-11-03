@@ -66,18 +66,16 @@ A local Microsoft OneNote MCP server for Windows. It controls the OneNote deskto
 3. **Check it:**
    ```powershell
    .\.venv\Scripts\python.exe scripts\check_codex_config.py   # Codex config points at this folder
-   .\.venv\Scripts\python.exe scripts\smoke_mcp.py            # read-only check against your OneNote
+   .\.venv\Scripts\python.exe scripts\e2e_onenote.py          # full check in throwaway notebooks
    ```
 
 Starting the server does not start OneNote. OneNote is contacted on the first tool call.
-
-> The repository also contains an npm launcher (`bin/local-onenote-mcp.js`) that builds its own cached virtual environment. It is optional; the local-folder setup above is the supported path.
 
 ---
 
 ## Markdown, HTML & Reading Formats
 
-Write tools (`create_page`, `append_to_page`, `replace_page_body`) accept `content_format` = `plain`, `html`, or `markdown`. Markdown is parsed with the bundled `markdown-it-py` (CommonMark plus tables and strikethrough). It becomes:
+Write tools (`create_page`, `append_to_page`, `edit_page`, `replace_page_body`) accept `content_format` = `plain`, `html`, or `markdown`. Markdown is parsed with the bundled `markdown-it-py` (CommonMark plus tables and strikethrough). It becomes:
 
 | Markdown / HTML | In OneNote |
 | --- | --- |
@@ -91,7 +89,44 @@ Write tools (`create_page`, `append_to_page`, `replace_page_body`) accept `conte
 
 `append_to_page` and `add_image_to_page` place the new block below the page's existing content unless you pass `x`/`y`.
 
-`get_page` takes `format` = `text` or `markdown` and `include_ocr` (default `true`). Markdown read-back maps the same structures back (headings, lists, `- [x]` to-dos, tables, code fences, image OCR text as quotes).
+`get_page` takes `format` = `text` or `markdown` and `include_ocr` (default `true`). Markdown read-back maps the same structures back (headings, lists, `- [x]` to-dos, tables, code fences, image OCR text as quotes). Handwriting that OneNote has recognised is read as text; other ink is marked `[Handwriting: …]`.
+
+---
+
+## Editing part of a page
+
+`edit_page` changes single paragraphs and leaves everything else on the page alone: images, handwriting, attachments and other text blocks are not resubmitted. Take paragraph IDs from `get_page(include_paragraphs=true)`, then send a list of operations that are applied together in one update:
+
+```json
+[
+  {"op": "replace_text", "find": "2025", "replace": "2026"},
+  {"op": "set_text", "paragraph_id": "{…}{48}{B0}", "content": "**new** wording"},
+  {"op": "insert_after", "paragraph_id": "{…}{51}{B0}", "content": "- extra item\n- [ ] follow-up"},
+  {"op": "set_todo", "paragraph_id": "{…}{55}{B0}", "done": true},
+  {"op": "delete", "paragraph_id": "{…}{60}{B0}"}
+]
+```
+
+- `replace_text` keeps bold, links and other formatting around the match; a match must lie inside one formatting run.
+- `set_text` keeps the paragraph's bullet, number, to-do box and style.
+- `insert_after` / `insert_before` take any amount of Markdown, HTML or plain text and reuse the page's own heading and To Do definitions.
+- `delete` removes the paragraph and its indented children; a block left empty is removed.
+
+If one operation is invalid (for example an unknown paragraph ID), nothing is written.
+
+---
+
+## Backups
+
+Every destructive tool (`edit_page`, `replace_page_body`, `delete_page_content`, `update_page_xml`, `delete_hierarchy`, `restore_backup` itself) first saves the page to `%LOCALAPPDATA%\local-onenote-mcp\backups.sqlite3`. `list_backups` shows them and `restore_backup` brings one back, either into the original page (`mode="replace"`) or as a new page (`mode="new_page"`, the default, which also works after the page was deleted).
+
+The store stays small and bounded:
+
+- **Images, ink and attachments are stored once.** Each is kept by its SHA-256 hash; ten backups of a page with the same photo store the photo once. The page XML itself is zlib-compressed.
+- **Unchanged pages are not saved again.** If the page is identical to its newest backup, that backup is reused.
+- **Old backups are dropped automatically:** at most 10 per page, none older than 30 days, and the whole file under 200 MB (oldest first; the newest backup is always kept). Images that no backup uses any more are deleted and the file shrinks.
+
+Measured on 150 random pages of a real 4,800-page collection: the page text and structure take 5 KB per backup on average. Images and ink take the rest (about 0.8 MB per page on average, already compressed by their formats). Saving takes 44 ms (median), and saving unchanged pages again adds 0 bytes. Change the limits with the variables below, or set `LOCAL_ONENOTE_MCP_BACKUP=0` to turn backups off.
 
 ---
 
@@ -100,20 +135,23 @@ Write tools (`create_page`, `append_to_page`, `replace_page_body`) accept `conte
 Each tool is annotated as read-only, writing, or destructive, so MCP clients can auto-approve reads and ask before deletes. Failures are returned as MCP tool errors (`isError: true`) with the reason.
 
 ### 1. Discovery & Reading
-* `health_check`: Server version, Python location, feature list, and text-index progress.
+* `health_check`: Server version, Python location, OneNote's special folders, text-index progress and backup storage.
 * `resolve_identifier`: Turn an ID, path, or name into one live object.
 * `list_notebooks` / `list_sections` / `list_pages` / `list_hierarchy`: Traverse the live OneNote structure. `list_hierarchy` returns at most `max_items` (default 500) and reports `total` / `truncated`.
-* `get_page`: Title and body as text or Markdown. `include_objects=true` lists outlines, images, ink and attachments with `object_id` and `callback_id`; `include_xml=true` adds the raw page XML.
+* `get_page`: Title and body as text or Markdown. `include_paragraphs=true` lists paragraph IDs for `edit_page`; `include_objects=true` lists outlines, images, ink and attachments with `object_id` and `callback_id`; `include_xml=true` adds the raw page XML.
 * `get_page_image`: Return an image from a page as MCP image content, so the model can look at it.
-* `get_binary_content`: Download an image or attached file as base64.
-* `search_pages`: Pages containing every word of the query, ranked (title matches first, then number of occurrences in the body).
-* `find_meta`, `get_hyperlink`, `get_special_locations`
+* `get_binary_content`: Download an image (`callback_id`) or attached file (`file_name`), as base64 or straight to a file with `save_to`.
+* `search_pages`: Pages containing every word of the query, ranked (title matches first, then number of occurrences in the body). `modified_after` / `modified_before` filter by edit date; with no query they list the pages edited in that window, newest first.
+* `get_hyperlink`
 
 ### 2. Creation & Edits
 * `open_hierarchy` / `create_notebook` / `create_section` / `create_section_group`
-* `create_page`, `update_page_title`, `append_to_page`, `add_image_to_page`
-* `replace_page_body`: Writes the new body first, then removes the old objects, so a failed write never empties the page.
+* `create_page`, `update_page_title`, `append_to_page`, `add_image_to_page`, `add_file_to_page`
+* `edit_page`: Change, insert, delete or tick single paragraphs (see above).
+* `copy_page`: Copy a page with its images, handwriting and attachments into any section.
+* `replace_page_body`: Replace the whole body. Writes the new body first, then removes the old objects, so a failed write never empties the page.
 * `delete_page_content`, `delete_hierarchy` (pages are always matched by ID, so a page with a duplicate title is never touched)
+* `list_backups`, `restore_backup`
 
 ### 3. Moving & Organizing
 * `move_page`: Move a page to another section in any notebook, or reorder it inside its section (`after_page_identifier`, `to_top`, or end). Subpages move with it unless `include_subpages=false`. A page moved to another section gets a new ID; the tool returns old and new IDs.
@@ -159,23 +197,40 @@ The index is stored at `%LOCALAPPDATA%\local-onenote-mcp\text-index.sqlite3` and
 | `LOCAL_ONENOTE_MCP_INDEX_PATH` | | Custom location for the text index file |
 | `LOCAL_ONENOTE_MCP_BACKGROUND_INDEX` | `1` | `0` stops the background indexer; pages are then indexed only when a search reads them |
 | `LOCAL_ONENOTE_MCP_INDEX_REFRESH_SECONDS` | `120` | Minimum gap between background passes that pick up edited pages |
+| `LOCAL_ONENOTE_MCP_BACKUP` | `1` | `0` turns page backups off |
+| `LOCAL_ONENOTE_MCP_BACKUP_PATH` | | Custom location for the backup file |
+| `LOCAL_ONENOTE_MCP_BACKUP_MB` | `200` | Size limit of the backup file |
+| `LOCAL_ONENOTE_MCP_BACKUP_VERSIONS` | `10` | Backups kept per page |
+| `LOCAL_ONENOTE_MCP_BACKUP_DAYS` | `30` | Backups older than this are deleted |
+
+---
+
+## Code Layout
+
+| File | Role |
+| --- | --- |
+| `server.py` | Entry point: registers the tools and serves MCP over stdio |
+| `app.py`, `config.py` | Shared runtime (settings, OneNote connection, index, backups) and the `tool` decorator |
+| `bridge.py`, `onenote.py` | The PowerShell COM bridge; hierarchy cache, identifier resolution and page I/O on top of it |
+| `hierarchy.py`, `pagexml.py`, `markup.py`, `reader.py` | Parse hierarchy XML; build and inspect page XML; Markdown/HTML to OneNote; OneNote to text/Markdown |
+| `editing.py` | Paragraph-level page edits |
+| `backup.py`, `pages.py` | Backup store; snapshots, copies and restores |
+| `search.py`, `text_index.py` | Search ranking, date filters and the background text index |
+| `tools/` | The MCP tools: `reading`, `writing`, `organizing`, `system` |
 
 ---
 
 ## Tests
 
 ```powershell
-# Unit tests (no OneNote needed except one bridge test that only starts PowerShell)
+# Unit tests (an in-memory fake stands in for OneNote; one bridge test starts PowerShell)
 .\.venv\Scripts\python.exe -m pytest -q
 
-# Read-only check against your OneNote
-.\.venv\Scripts\python.exe scripts\smoke_mcp.py
-
-# Full write/read/search/image/move/delete cycle in throwaway notebooks (temp folder, closed afterwards)
+# Full cycle in throwaway notebooks (temp folder, closed afterwards)
 .\.venv\Scripts\python.exe scripts\e2e_onenote.py
 ```
 
-`e2e_onenote.py` runs 20 checks, including moving pages and sections between two notebooks and confirming the result after closing and reopening them. It also exports its test page to PDF and prints the folder, so formatting can be checked by eye.
+`e2e_onenote.py` runs 27 checks against the real OneNote app, including partial edits, backup and restore, copying a page with an image and an attachment, moving pages and sections between two notebooks, and confirming the result after closing and reopening them. It also exports its test page to PDF and prints the folder, so formatting can be checked by eye.
 
 ---
 

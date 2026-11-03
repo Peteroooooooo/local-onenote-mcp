@@ -12,6 +12,7 @@ from .constants import ONE_NS
 
 ReadFormat = Literal["text", "markdown"]
 _NS = f"{{{ONE_NS}}}"
+INK_LABEL = "[Handwriting: no recognised text; export the page with publish_object to see it]"
 
 
 def _local(tag: str) -> str:
@@ -125,7 +126,7 @@ class PageRenderer:
             elif kind == "Image":
                 blocks.append(self._image(node))
             elif kind == "InkDrawing":
-                blocks.append("[Ink drawing]")
+                blocks.append(INK_LABEL)
             elif kind in {"InsertedFile", "MediaFile"}:
                 blocks.append(self._file(node, kind))
         return "\n\n".join(block for block in blocks if block).strip()
@@ -182,8 +183,10 @@ class PageRenderer:
                 lines.extend(["", *self._indent(self._table(node), indent), ""])
             elif kind == "Image":
                 lines.extend(["", *self._indent(self._image(node).split("\n"), indent), ""])
-            elif kind == "InkDrawing" or kind == "InkWord":
-                body.append("[Ink]")
+            elif kind == "InkWord" and node.attrib.get("recognizedText"):
+                body.append(node.attrib["recognizedText"])
+            elif kind in {"InkDrawing", "InkWord"}:
+                body.append(INK_LABEL)
             elif kind in {"InsertedFile", "MediaFile"}:
                 lines.extend(self._indent([self._file(node, kind)], indent))
         text = "".join(body)

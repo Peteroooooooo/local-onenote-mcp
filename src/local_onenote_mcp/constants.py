@@ -1,7 +1,11 @@
-"""OneNote COM constants used by the local MCP server."""
+"""OneNote COM constants."""
+
+import xml.etree.ElementTree as ET
 
 ONE_NS = "http://schemas.microsoft.com/office/onenote/2013/onenote"
+ONE = f"{{{ONE_NS}}}"
 XML_SCHEMA_2013 = 2
+ET.register_namespace("one", ONE_NS)
 
 HIERARCHY_SCOPES = {
     "self": 0,
@@ -72,3 +76,10 @@ FILING_LOCATION_TYPES = {
     "current_page": 2,
     "named_page": 4,
 }
+
+
+def enum_value(name: str, value: str, options: dict[str, int]) -> int:
+    key = (value or "").strip().casefold()
+    if key not in options:
+        raise ValueError(f"{name} must be one of: {', '.join(sorted(options))}")
+    return options[key]

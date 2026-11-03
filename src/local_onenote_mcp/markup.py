@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import html
 import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 
 from markdown_it import MarkdownIt
+
+from .constants import ONE
 
 
 HEADING_STYLES = {
@@ -250,30 +253,58 @@ TODO_TAG_DEF = 'type="0" symbol="3" fontColor="automatic" highlightColor="none" 
 
 
 class StyleSet:
-    """Native OneNote styles used by one page update.
+    """Native OneNote styles (QuickStyleDef) and the To Do tag (TagDef) used by one page update.
 
-    QuickStyleDef/TagDef indexes only need to be unique inside the update XML;
-    OneNote merges them with the page's own definitions by name.
+    Indexes only need to be consistent inside the submitted XML; OneNote maps them
+    onto the page's own definitions by name. When editing an existing page, seed
+    the set with that page's definitions so existing paragraphs keep their indexes.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, existing_defs: list[ET.Element] | None = None) -> None:
+        self.existing = list(existing_defs or [])
         self.quick: dict[str, int] = {}
-        self.todo = False
+        self.new_quick: list[str] = []
+        self.todo_index: int | None = None
+        self.new_todo = False
+        self._next_quick = 0
+        self._next_tag = 0
+        for node in self.existing:
+            index = int(node.attrib.get("index", "0"))
+            if node.tag == ONE + "QuickStyleDef":
+                self.quick.setdefault(node.attrib.get("name", ""), index)
+                self._next_quick = max(self._next_quick, index + 1)
+            elif node.tag == ONE + "TagDef":
+                if self.todo_index is None and node.attrib.get("type") == "0" and node.attrib.get("symbol") == "3":
+                    self.todo_index = index
+                self._next_tag = max(self._next_tag, index + 1)
 
     def quick_index(self, name: str) -> int:
-        # Index 0 is left alone: table cells reference quickStyleIndex="0".
         if name not in self.quick:
-            self.quick[name] = len(self.quick) + 1
+            self.quick[name] = self._next_quick
+            self._next_quick += 1
+            self.new_quick.append(name)
         return self.quick[name]
 
+    def todo_tag(self) -> int:
+        if self.todo_index is None:
+            self.todo_index = self._next_tag
+            self._next_tag += 1
+            self.new_todo = True
+        return self.todo_index
+
     def defs_xml(self) -> str:
-        tag = f'<one:TagDef index="0" {TODO_TAG_DEF}/>' if self.todo else ""
-        quick = "".join(
-            f'<one:QuickStyleDef index="{index}" name="{name}" highlightColor="automatic" '
+        """TagDefs, then QuickStyleDefs (the schema order); existing definitions are copied unchanged."""
+
+        tags = [ET.tostring(node, encoding="unicode") for node in self.existing if node.tag == ONE + "TagDef"]
+        if self.new_todo:
+            tags.append(f'<one:TagDef index="{self.todo_index}" {TODO_TAG_DEF}/>')
+        quick = [ET.tostring(node, encoding="unicode") for node in self.existing if node.tag == ONE + "QuickStyleDef"]
+        quick.extend(
+            f'<one:QuickStyleDef index="{self.quick[name]}" name="{name}" highlightColor="automatic" '
             f'spaceBefore="0.0" spaceAfter="0.0" {QUICK_STYLES[name]}/>'
-            for name, index in self.quick.items()
+            for name in self.new_quick
         )
-        return tag + quick
+        return "".join(tags + quick)
 
 
 def _oe(
@@ -295,18 +326,10 @@ def _oe(
         fragment = _styled(fragment, fallback)
     tag_part = ""
     if todo is not None and styles is not None:
-        styles.todo = True
-        tag_part = f'<one:Tag index="0" completed="{"true" if todo else "false"}"/>'
+        tag_part = f'<one:Tag index="{styles.todo_tag()}" completed="{"true" if todo else "false"}"/>'
     elif todo is not None:
         fragment = CHECKBOX[todo] + fragment
     return f"<one:OE{attrs}>{tag_part}{list_part}{one_t(fragment)}{children_xml}</one:OE>"
-
-
-def oe_children(fragment_html: str) -> str:
-    """Split an inline fragment on <br/> into one OneNote paragraph per line."""
-
-    parts = re.split(r"<br\s*/?>", fragment_html)
-    return "".join(_oe(part) for part in parts)
 
 
 @dataclass
@@ -437,7 +460,7 @@ def _one_table_cell(cell: TableCell) -> str:
     return (
         f"<one:Cell{shading}>"
         "<one:OEChildren>"
-        f'<one:OE alignment="left" quickStyleIndex="0"{style_attr}>{one_t(cell_html)}</one:OE>'
+        f'<one:OE alignment="left"{style_attr}>{one_t(cell_html)}</one:OE>'
         "</one:OEChildren>"
         "</one:Cell>"
     )

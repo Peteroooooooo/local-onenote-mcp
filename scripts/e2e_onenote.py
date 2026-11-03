@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
+from local_onenote_mcp.hierarchy import parse_xml
+from local_onenote_mcp.pagexml import content_bottom
 from mcp.client.stdio import stdio_client
 
 TOKEN = f"E2E_TOKEN_{int(time.time())}"
@@ -81,7 +83,7 @@ async def main() -> int:
     params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "local_onenote_mcp.server"],
-        env={**os.environ, "LOCAL_ONENOTE_MCP_BACKGROUND_INDEX": "0"},
+        env={**os.environ, "LOCAL_ONENOTE_MCP_BACKGROUND_INDEX": "0", "LOCAL_ONENOTE_MCP_BACKUP_PATH": str(root / "backups.sqlite3")},
     )
     checks = Checks()
     timings: dict[str, int] = {}
@@ -123,7 +125,6 @@ async def main() -> int:
                 await call("add_image_to_page", page_identifier=first["page_id"], image_path=str(image), width=96)
                 after = await call("get_page", page_identifier=first["page_id"], include_objects=True, include_xml=True)
                 objects = after["objects"]
-                from local_onenote_mcp.xml_utils import content_bottom, parse_xml
 
                 image_y = None
                 for node in parse_xml(after["xml"]).iter():
@@ -146,13 +147,19 @@ async def main() -> int:
                 exported = await call("publish_object", object_identifier=first["page_id"], target_path=str(pdf), format="pdf", overwrite=True)
                 checks.add("publish_object writes a PDF", exported.get("ok") and pdf.exists() and pdf.stat().st_size > 1000, str(pdf))
 
+                await edit_checks(call, checks, root, section_id, first["page_id"])
+
                 await call("replace_page_body", page_identifier=second["page_id"], content="replaced body")
                 replaced = await call("get_page", page_identifier=second["page_id"])
                 checks.add("replace_page_body swaps the body", replaced.get("text") == "replaced body", replaced.get("text"))
 
-                await call("delete_hierarchy", object_identifier=second["page_id"], permanently=True)
+                gone = await call("delete_hierarchy", object_identifier=second["page_id"], permanently=True)
                 remaining = [p["id"] for p in (await call("list_pages", section_identifier=section_id)).get("pages", [])]
                 checks.add("deleting one duplicate keeps the other", first["page_id"] in remaining and second["page_id"] not in remaining)
+                back = await call("restore_backup", backup_id=(gone.get("backup_ids") or [0])[0])
+                back_text = (await call("get_page", page_identifier=back.get("page_id", ""))).get("text")
+                checks.add("a permanently deleted page can be restored from its backup", back.get("ok") and back_text == "replaced body", back.get("error") or back_text)
+                await call("delete_hierarchy", object_identifier=back.get("page_id", ""), permanently=True)
 
                 await move_checks(call, checks, root, notebook_id, section_id)
             finally:
@@ -163,6 +170,70 @@ async def main() -> int:
     failed = [row for row in checks.rows if not row["ok"]]
     print(json.dumps({"ok": not failed, "folder": str(root), "checks": checks.rows, "timings_ms": timings}, ensure_ascii=False, indent=2))
     return 0 if not failed else 1
+
+
+async def edit_checks(call, checks: Checks, root: Path, section_id: str, page_id: str) -> None:
+    async def read(pid: str) -> dict[str, Any]:
+        return await call("get_page", page_identifier=pid, format="markdown", include_paragraphs=True, include_objects=True)
+
+    def images(page: dict[str, Any]) -> int:
+        return sum(1 for obj in page.get("objects", []) if obj["type"] == "Image")
+
+    before = await read(page_id)
+    ids = {p.get("text"): p["id"] for p in before["paragraphs"]}
+    edited = await call(
+        "edit_page",
+        page_identifier=page_id,
+        operations=[
+            {"op": "replace_text", "find": "step two", "replace": "step 2"},
+            {"op": "set_text", "paragraph_id": ids["second bullet"], "content": "**edited** bullet"},
+            {"op": "insert_after", "paragraph_id": ids["first bullet"], "content": "- inserted bullet"},
+            {"op": "set_todo", "paragraph_id": ids["open task"], "done": True},
+            {"op": "delete", "paragraph_id": ids["quoted line"]},
+        ],
+    )
+    after = await read(page_id)
+    text = after.get("text", "")
+    checks.add(
+        "edit_page changes only the targeted paragraphs",
+        edited.get("ok")
+        and all(piece in text for piece in ("2. step 2", "- **edited** bullet", "- first bullet\n- inserted bullet", "- [x] open task", "| Beta | Infra |", "```", TOKEN))
+        and "quoted line" not in text,
+        edited.get("error") or text,
+    )
+    checks.add("edit_page keeps images and the title", images(after) == images(before) == 1 and after.get("title") == before.get("title"), {"before": images(before), "after": images(after), "title": after.get("title")})
+
+    listed = await call("list_backups", page_identifier=page_id)
+    checks.add("edit_page saved a backup", edited.get("backup_id") in [b["backup_id"] for b in listed.get("backups", [])], listed)
+
+    restored = await call("restore_backup", backup_id=edited.get("backup_id") or 0, mode="replace")
+    back = await read(page_id)
+    checks.add(
+        "restore_backup(replace) brings the page back exactly",
+        restored.get("ok") and back.get("text") == before.get("text") and images(back) == 1 and back.get("title") == before.get("title"),
+        restored.get("error") or {"title": back.get("title"), "images": images(back), "text": back.get("text")},
+    )
+
+    attachment = root / "notes.txt"
+    attachment.write_text("attachment body ✓", encoding="utf-8")
+    attached = await call("add_file_to_page", page_identifier=page_id, file_path=str(attachment))
+    original = await read(page_id)
+    copied = await call("copy_page", page_identifier=page_id)
+    copy = await read(copied.get("page_id", ""))
+    files = [obj for obj in copy.get("objects", []) if obj["type"] == "InsertedFile"]
+    saved = root / "copied-notes.txt"
+    if files:
+        await call("get_binary_content", page_identifier=copied["page_id"], file_name=files[0].get("preferredName", ""), save_to=str(saved))
+    checks.add(
+        "copy_page copies text, images and attachments",
+        attached.get("ok") and copied.get("ok") and copy.get("text") == original.get("text") and images(copy) == 1
+        and saved.exists() and saved.read_bytes() == attachment.read_bytes(),
+        attached.get("error") or copied.get("error") or {"files": files, "images": images(copy), "copy": copy.get("text"), "original": original.get("text")},
+    )
+
+    today = time.strftime("%Y-%m-%d")
+    recent = await call("search_pages", modified_after=today, start_identifier=section_id, max_results=50)
+    checks.add("search_pages filters by modification date", page_id in [p["id"] for p in recent.get("pages", [])], recent.get("error") or recent.get("count"))
 
 
 async def move_checks(call, checks: Checks, root: Path, notebook_id: str, section_id: str) -> None:
