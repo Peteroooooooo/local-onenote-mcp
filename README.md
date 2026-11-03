@@ -87,9 +87,9 @@ Write tools (`create_page`, `append_to_page`, `edit_page`, `replace_page_body`) 
 | Fenced code | OneNote code style, one line per paragraph, indentation kept |
 | `**bold**`, `*italic*`, `~~strike~~`, `` `code` ``, links | Inline formatting (`http`, `https`, `mailto`, `onenote` links only) |
 
-`append_to_page` and `add_image_to_page` place the new block below the page's existing content unless you pass `x`/`y`.
+`append_to_page` places new text, an image (`image_path`) or an attached file (`file_path`) below the page's existing content unless you pass `x`/`y`.
 
-`get_page` takes `format` = `text` or `markdown` and `include_ocr` (default `true`). Markdown read-back maps the same structures back (headings, lists, `- [x]` to-dos, tables, code fences, image OCR text as quotes). Handwriting that OneNote has recognised is read as text; other ink is marked `[Handwriting: …]`. To see such a page, `view_page` prints it to PDF in OneNote and returns each printed page as a JPEG image (about 1.3 s for a one-page note, 240 KB per image at the default 1000 px width).
+`get_page` takes `format` = `text` or `markdown` and `include_ocr` (default `true`). Markdown read-back maps the same structures back (headings, lists, `- [x]` to-dos, tables, code fences, image OCR text as quotes). OneNote stores mixed Chinese/Latin text as separate font runs; the reader joins runs with the same formatting, so bold or italic text comes back as one `**…**` span. Handwriting that OneNote has recognised is read as text; other ink is marked `[Handwriting: …]`. To see such a page, `view_page` prints it to PDF in OneNote and returns each printed page as a JPEG image (about 1.3 s for a one-page note, 240 KB per image at the default 1000 px width). With `callback_id` it returns just that one image from the page.
 
 ---
 
@@ -108,10 +108,10 @@ Write tools (`create_page`, `append_to_page`, `edit_page`, `replace_page_body`) 
 ]
 ```
 
-- `replace_text` keeps bold, links and other formatting around the match; a match must lie inside one formatting run.
+- `replace_text` keeps bold, links and other formatting around the match. A match may span formatting runs (OneNote splits `每分钟 60 次` into three); the replacement takes the formatting of the run where the match starts. Matches never cross paragraphs or line breaks.
 - `set_text` keeps the paragraph's bullet, number, to-do box and style.
 - `insert_after` / `insert_before` take any amount of Markdown, HTML or plain text and reuse the page's own heading and To Do definitions.
-- `delete` removes the paragraph and its indented children; a block left empty is removed.
+- `delete` removes the paragraph and its indented children; a block left empty is removed. Given the `object_id` of a whole text block, image, ink drawing or attachment (from `get_page(include_objects=true)`), it removes that object.
 - Table cells are paragraphs too: `get_page(include_paragraphs=true)` gives each one its `table`, `row` and `column`. `set_text` changes a cell, `add_row` adds a row after the row of the given cell (or at the end, given the table's own paragraph), `delete_row` removes the row of the given cell. Deleting the only paragraph of a cell empties it.
 
 If one operation is invalid (for example an unknown paragraph ID), nothing is written.
@@ -120,7 +120,7 @@ If one operation is invalid (for example an unknown paragraph ID), nothing is wr
 
 ## Backups
 
-Every destructive tool (`edit_page`, `replace_page_body`, `delete_page_content`, `update_page_xml`, `delete_hierarchy`, `restore_backup` itself) first saves the page to `%LOCALAPPDATA%\local-onenote-mcp\backups.sqlite3`. `list_backups` shows them and `restore_backup` brings one back, either into the original page (`mode="replace"`) or as a new page (`mode="new_page"`, which also works after the page was deleted). The default, `mode="auto"`, puts block backups back in place and restores whole pages as new pages.
+Every destructive tool (`edit_page`, `replace_page_body`, `submit_xml` for pages, `delete_item` for the pages it deletes, `restore_backup` itself) first saves the page to `%LOCALAPPDATA%\local-onenote-mcp\backups.sqlite3`. `list_backups` shows them and `restore_backup` brings one back, either into the original page (`mode="replace"`) or as a new page (`mode="new_page"`, which also works after the page was deleted). The default, `mode="auto"`, puts block backups back in place and restores whole pages as new pages.
 
 The store stays small and bounded:
 
@@ -139,39 +139,37 @@ Each tool is annotated as read-only, writing, or destructive, so MCP clients can
 
 ### 1. Discovery & Reading
 * `health_check`: Server version, Python location, OneNote's special folders, text-index progress and backup storage.
-* `resolve_identifier`: Turn an ID, path, or name into one live object.
-* `list_notebooks` / `list_sections` / `list_pages` / `list_hierarchy`: Traverse the live OneNote structure. `list_hierarchy` returns at most `max_items` (default 500) and reports `total` / `truncated`.
+* `resolve_identifier`: Turn an ID, path, or name into one live object. With `link="onenote"` or `"web"` it returns a link to the object (or to one paragraph with `paragraph_id`).
+* `list_hierarchy`: Notebooks, sections and pages with full paths. With no arguments it lists notebooks and sections; `start_identifier` lists what is under one item; `item_type` (`notebook`, `section_group`, `section`, `page`) filters. Returns at most `max_items` (default 500) and reports `total` / `truncated`.
 * `get_page`: Title and body as text or Markdown. `include_paragraphs=true` lists paragraph IDs for `edit_page`; `include_objects=true` lists outlines, images, ink and attachments with `object_id` and `callback_id`; `include_xml=true` adds the raw page XML.
-* `get_page_image`: Return an image from a page as MCP image content, so the model can look at it.
-* `view_page`: Show the whole page as it looks in OneNote (handwriting, drawings, layout) as JPEG images, one per printed page.
+* `view_page`: Show the whole page as it looks in OneNote (handwriting, drawings, layout) as JPEG images, one per printed page; or one image from the page with `callback_id`.
 * `get_binary_content`: Download an image (`callback_id`) or attached file (`file_name`), as base64 or straight to a file with `save_to`.
 * `search_pages`: Pages containing every word of the query, ranked (title matches first, then number of occurrences in the body). `modified_after` / `modified_before` filter by edit date; with no query they list the pages edited in that window, newest first.
-* `get_hyperlink`
 
 ### 2. Creation & Edits
-* `open_hierarchy` / `create_notebook` / `create_section` / `create_section_group`
-* `create_page`, `update_page_title`, `append_to_page`, `add_image_to_page`, `add_file_to_page`
-* `edit_page`: Change, insert, delete or tick single paragraphs, and edit table cells and rows (see above).
-* `copy_page`: Copy a page with its images, handwriting and attachments into any section.
+* `create_item`: Create a notebook (`kind="notebook"`, `name` is a folder path), section or section group.
+* `open_notebook`: Open an existing notebook folder.
+* `create_page`: New page with Markdown, HTML or plain content.
+* `append_to_page`: Add text, an image (`image_path`, optional `width`/`height`) or an attached file (`file_path`, `display_name`). Give exactly one of them.
+* `edit_page`: Change, insert, delete or tick single paragraphs, edit table cells and rows, and delete whole objects (see above).
 * `replace_page_body`: Replace the whole body. Writes the new body first, then removes the old objects, so a failed write never empties the page.
-* `delete_page_content`, `delete_hierarchy` (pages are always matched by ID, so a page with a duplicate title is never touched)
+* `copy_page`: Copy a page with its images, handwriting and attachments into any section.
+* `submit_xml`: Send raw OneNote XML. A `<one:Page>` goes to `UpdatePageContent` (after a backup); anything else to `UpdateHierarchy`.
 * `list_backups`, `restore_backup`
 
 ### 3. Moving & Organizing
-* `move_page`: Move a page to another section in any notebook, or reorder it inside its section (`after_page_identifier`, `to_top`, or end). Subpages move with it unless `include_subpages=false`. A page moved to another section gets a new ID; the tool returns old and new IDs.
-* `set_page_level`: Make a page a subpage (level 2 or 3) or promote it back to level 1.
+* `move_page`: Move a page to another section in any notebook, or reorder it inside its section (`after_page_identifier`, `to_top`, or end). Subpages move with it unless `include_subpages=false`. `level` (1–3) makes it a subpage or promotes it, on its own or together with a move. A page moved to another section gets a new ID; the tool returns old and new IDs.
 * `move_section`: Move a section or section group into a notebook or section group in any notebook, or reorder it among its siblings. IDs are kept. For local notebooks it waits until OneNote has moved the `.one` file on disk, so the move survives closing the notebook.
-* `rename_section`: Rename a section or section group (pages are renamed with `update_page_title`).
+* `rename_item`: Rename a page (its title), section or section group.
 * `merge_sections`: Merge one section into another.
+* `delete_item`: Delete a page, section or section group, to the recycle bin unless `permanently=true`. Pages are backed up first and always matched by ID, so a page with a duplicate title is never touched. Notebooks are closed with `close_notebook`, not deleted.
 
 All of these refuse to touch the recycle bin, and the section tools refuse name clashes and moving a group into itself.
 
 ### 4. File & App Control
 * `publish_object`: Export a notebook, section, or page to PDF, XPS, Word, MHT, HTML, EMF, or OneNote package files.
-* `navigate_to` / `navigate_to_url`, `sync_hierarchy`, `close_notebook`, `set_filing_location`
-
-### 5. Raw Low-Level Control
-* `update_page_xml` / `update_hierarchy_xml`: Submit raw OneNote XML to `UpdatePageContent` / `UpdateHierarchy`.
+* `navigate_to`: Open an object (or a paragraph) in OneNote, or an `onenote:` link.
+* `sync_hierarchy`, `close_notebook`
 
 > **Identifier Resolution:** identifiers are tried as
 > 1. OneNote object ID (fastest; the only safe choice for pages, because page titles are often duplicated)
@@ -239,6 +237,8 @@ The index is stored at `%LOCALAPPDATA%\local-onenote-mcp\text-index.sqlite3` and
 ---
 
 ## Limits & Boundaries
+
+`view_page` renders through OneNote's PDF printer: some colour emoji print as outlines or plain symbols there, while the page itself keeps them.
 
 OneNote sometimes answers "class not registered" for a moment while it rewrites notebook files; reads and hierarchy updates are retried once after 0.5 s.
 

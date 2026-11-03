@@ -348,11 +348,11 @@ class _Context:
         return _oe(fragment, styles=self.styles, **kwargs)  # type: ignore[arg-type]
 
 
-def _paragraphs(fragment: str, context: _Context) -> list[str]:
+def _paragraphs(fragment: str, context: _Context, style: str = "") -> list[str]:
     fragment = _tidy_breaks(fragment)
     if not fragment:
         return []
-    return [context.oe(part) for part in fragment.split("<br/>")]
+    return [context.oe(_styled(part, style)) for part in fragment.split("<br/>")]
 
 
 def _list_marker(ordered: bool, number: int, depth: int) -> str:
@@ -504,7 +504,7 @@ def _render_block(node: Node, context: _Context) -> list[str]:
         inner = _tidy_breaks(render_inline(node.children))
         return [context.oe(part, quick=tag) for part in inner.split("<br/>") if part]
     if tag == "p":
-        return _paragraphs(render_inline(node.children), context)
+        return _paragraphs(render_inline(node.children), context, html.escape(node.attrs.get("style", ""), quote=True))
     if tag in {"ul", "ol"}:
         return _render_list(node, context)
     if tag == "pre":

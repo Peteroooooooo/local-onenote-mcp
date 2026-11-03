@@ -61,22 +61,6 @@ SPECIAL_LOCATIONS = {
     "default_notebook_folder": 2,
 }
 
-FILING_LOCATIONS = {
-    "email": 0,
-    "contacts": 1,
-    "tasks": 2,
-    "meetings": 3,
-    "web_content": 4,
-    "printouts": 5,
-}
-
-FILING_LOCATION_TYPES = {
-    "named_section_new_page": 0,
-    "current_section_new_page": 1,
-    "current_page": 2,
-    "named_page": 4,
-}
-
 
 def enum_value(name: str, value: str, options: dict[str, int]) -> int:
     key = (value or "").strip().casefold()

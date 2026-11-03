@@ -28,70 +28,76 @@ def _children(node: ET.Element, name: str) -> list[ET.Element]:
 
 
 class _InlineReader(HTMLParser):
-    """Turn a one:T inline HTML fragment into text, optionally with Markdown marks."""
+    """Turn a one:T inline HTML fragment into text, optionally with Markdown marks.
 
-    def __init__(self, markdown: bool) -> None:
+    OneNote splits text into runs whenever the font changes (Chinese and Latin text get separate runs), so the
+    Markdown output merges neighbouring runs with the same formatting before adding marks.
+    """
+
+    def __init__(self, markdown: bool, ignore: str = "") -> None:
         super().__init__(convert_charrefs=True)
         self.markdown = markdown
-        self.parts: list[str] = []
-        self._closers: list[tuple[str, int]] = []
-        self._links: list[str | None] = []
+        self.ignore = ignore
+        self.segments: list[tuple[str, str, str]] = []  # (text, marks, link)
+        self._marks: list[set[str]] = []
+        self._links: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.lower()
         if tag == "br":
-            self.parts.append("\n")
-            return
-        if not self.markdown:
+            self.handle_data("\n")
             return
         attributes = {name.lower(): value or "" for name, value in attrs}
         if tag == "a":
-            href = attributes.get("href", "")
-            self._links.append(href or None)
-            if href:
-                self.parts.append("[")
+            self._links.append(attributes.get("href", ""))
             return
         style = attributes.get("style", "").replace(" ", "").lower()
-        marks = ""
+        marks = set()
         if tag in {"b", "strong"} or "font-weight:bold" in style:
-            marks += "**"
+            marks.add("**")
         if tag in {"i", "em"} or "font-style:italic" in style:
-            marks += "*"
+            marks.add("*")
         if tag in {"s", "del", "strike"} or "line-through" in style:
-            marks += "~~"
+            marks.add("~~")
         if "consolas" in style or "courier" in style:
-            marks += "`"
-        self._closers.append((marks[::-1], len(self.parts)))
-        self.parts.append(marks)
+            marks.add("`")
+        self._marks.append(marks)
 
     def handle_endtag(self, tag: str) -> None:
-        if not self.markdown:
-            return
         tag = tag.lower()
         if tag == "a":
-            href = self._links.pop() if self._links else None
-            if href:
-                self.parts.append(f"]({href})")
-            return
-        if tag == "br" or not self._closers:
-            return
-        closer, opened_at = self._closers.pop()
-        if not closer:
-            return
-        if "".join(self.parts[opened_at + 1 :]).strip():
-            self.parts.append(closer)
-        else:
-            self.parts[opened_at] = ""
+            if self._links:
+                self._links.pop()
+        elif tag != "br" and self._marks:
+            self._marks.pop()
 
     def handle_data(self, data: str) -> None:
-        self.parts.append(data.replace("\xa0", " "))
+        held = set().union(*self._marks)
+        marks = "".join(mark for mark in ("**", "*", "~~", "`") if mark in held and mark not in self.ignore)
+        link = self._links[-1] if self._links else ""
+        data = data.replace("\xa0", " ")
+        if self.segments and (self.segments[-1][1:] == (marks, link) or (not data.strip() and not link)):
+            previous, marks, link = self.segments.pop()
+            data = previous + data
+        self.segments.append((data, marks, link))
 
     def result(self) -> str:
-        return "".join(self.parts).replace("\x00", "")
+        if not self.markdown:
+            return "".join(text for text, _, _ in self.segments).replace("\x00", "")
+        out = []
+        for text, marks, link in self.segments:
+            core = text.strip()
+            if core and marks:
+                lead, trail = text[: len(text) - len(text.lstrip())], text[len(text.rstrip()) :]
+                text = f"{lead}{marks}{core}{marks[::-1]}{trail}"
+            if link and core:
+                text = f"[{text}]({link})"
+            out.append(text)
+        return "".join(out).replace("\x00", "")
 
 
-def inline_text(fragment: str | None, *, markdown: bool = False) -> str:
-    parser = _InlineReader(markdown)
+def inline_text(fragment: str | None, *, markdown: bool = False, ignore: str = "") -> str:
+    parser = _InlineReader(markdown, ignore)
     parser.feed(fragment or "")
     parser.close()
     return parser.result()
@@ -119,7 +125,7 @@ class PageRenderer:
         for node in self.root:
             kind = _local(node.tag)
             if kind == "Outline":
-                lines = self._oe_children(_child(node, "OEChildren"), 0)
+                lines = self._oe_children(_child(node, "OEChildren"), "")
                 text = "\n".join(lines).strip("\n")
                 if text:
                     blocks.append(text)
@@ -141,7 +147,7 @@ class PageRenderer:
                 return value
         return None
 
-    def _oe_children(self, container: ET.Element | None, depth: int) -> list[str]:
+    def _oe_children(self, container: ET.Element | None, indent: str) -> list[str]:
         if container is None:
             return []
         lines: list[str] = []
@@ -149,11 +155,11 @@ class PageRenderer:
         for oe in _children(container, "OE"):
             is_code = self.markdown and self._style(oe) == "code"
             if is_code != in_code:
-                lines.append("  " * depth + "```")
+                lines.append(indent + "```")
                 in_code = is_code
-            lines.extend(self._oe(oe, depth))
+            lines.extend(self._oe(oe, indent))
         if in_code:
-            lines.append("  " * depth + "```")
+            lines.append(indent + "```")
         return lines
 
     def _style(self, oe: ET.Element) -> str:
@@ -169,16 +175,19 @@ class PageRenderer:
             return "> "
         return ""
 
-    def _oe(self, oe: ET.Element, depth: int) -> list[str]:
-        indent = "  " * depth
-        prefix = self._style_prefix(oe) + self._list_prefix(oe) + self._tag_prefix(oe)
+    def _oe(self, oe: ET.Element, indent: str) -> list[str]:
+        style_prefix, list_prefix, tag_prefix = self._style_prefix(oe), self._list_prefix(oe), self._tag_prefix(oe)
+        prefix = style_prefix + list_prefix + tag_prefix
+        marker = list_prefix or ("- " if tag_prefix.startswith("- ") else "")
+        child_indent = indent + (" " * len(marker) if marker and self.markdown else "  ")
         code = self.markdown and self._style(oe) == "code"
+        quote = style_prefix == "> "
         lines: list[str] = []
         body: list[str] = []
         for node in oe:
             kind = _local(node.tag)
             if kind == "T":
-                body.append(inline_text(node.text, markdown=self.markdown and not code))
+                body.append(inline_text(node.text, markdown=self.markdown and not code, ignore="*" if quote else ""))
             elif kind == "Table":
                 lines.extend(["", *self._indent(self._table(node), indent), ""])
             elif kind == "Image":
@@ -198,7 +207,7 @@ class PageRenderer:
             lines = text_lines + lines
         elif not lines and not self._has_children(oe):
             lines.append("")
-        lines.extend(self._oe_children(_child(oe, "OEChildren"), depth + 1))
+        lines.extend(self._oe_children(_child(oe, "OEChildren"), child_indent))
         return lines
 
     @staticmethod
@@ -237,7 +246,7 @@ class PageRenderer:
         for row in _children(table, "Row"):
             cells = []
             for cell in _children(row, "Cell"):
-                text = "\n".join(line.strip() for line in self._oe_children(_child(cell, "OEChildren"), 0))
+                text = "\n".join(line.strip() for line in self._oe_children(_child(cell, "OEChildren"), ""))
                 text = text.strip()
                 if self.markdown:
                     text = text.replace("|", "\\|").replace("\n", "<br>")

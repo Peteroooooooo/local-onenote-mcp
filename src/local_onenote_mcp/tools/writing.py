@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ..app import DESTRUCTIVE, READ_ONLY, WRITES, backups, ok, onenote, tool
-from ..constants import CREATE_FILE_TYPES, NEW_PAGE_STYLES, ONE, SPECIAL_LOCATIONS, enum_value
+from ..constants import CREATE_FILE_TYPES, NEW_PAGE_STYLES, ONE, SPECIAL_LOCATIONS, XML_SCHEMA_2013, enum_value
 from ..editing import EditOperation, PageEditor
 from ..hierarchy import ONENOTE_ID, child_path, in_recycle_bin, parse_xml, safe_leaf_name
 from ..image_utils import proportional_dimensions
@@ -25,18 +25,24 @@ RESTORE_MODES = {"auto", "new_page", "replace"}
 
 
 @tool(WRITES)
-def create_notebook(name_or_path: str, base_folder: str = "") -> dict[str, Any]:
-    """Create a local notebook folder and open it in OneNote."""
+def create_item(kind: str, name: str, parent_identifier: str = "") -> dict[str, Any]:
+    """Create a notebook, section or section group (kind: notebook, section, section_group).
 
-    raw = Path(name_or_path)
-    if not raw.is_absolute():
-        root = base_folder or onenote.call("get_special_location", location=SPECIAL_LOCATIONS["default_notebook_folder"])["path"]
-        raw = Path(root) / safe_leaf_name(name_or_path)
-    result = onenote.call("open_hierarchy", path=str(raw), relative_to_id="", create_file_type=CREATE_FILE_TYPES["notebook"])
-    return ok(path=str(raw), notebook_id=result["object_id"])
+    A section or group goes under parent_identifier (a notebook or section group). A notebook is a folder: name is
+    either a full folder path or a name placed in OneNote's default notebook folder.
+    """
 
-
-def _create_container(parent_identifier: str, name: str, kind: str) -> dict[str, Any]:
+    kind = kind.strip().casefold()
+    if kind == "notebook":
+        raw = Path(name)
+        if not raw.is_absolute():
+            raw = Path(onenote.call("get_special_location", location=SPECIAL_LOCATIONS["default_notebook_folder"])["path"]) / safe_leaf_name(name)
+        result = onenote.call("open_hierarchy", path=str(raw), relative_to_id="", create_file_type=CREATE_FILE_TYPES["notebook"])
+        return ok(path=str(raw), notebook_id=result["object_id"], item=onenote.lookup(result["object_id"]))
+    if kind not in {"section", "section_group"}:
+        raise ValueError("kind must be notebook, section or section_group.")
+    if not parent_identifier:
+        raise ValueError("parent_identifier (a notebook or section group) is required for sections and section groups.")
     parent = onenote.resolve(parent_identifier, full=True)
     if parent["type"] not in {"notebook", "section_group"}:
         raise ValueError("parent_identifier must resolve to a notebook or section_group.")
@@ -50,38 +56,11 @@ def _create_container(parent_identifier: str, name: str, kind: str) -> dict[str,
 
 
 @tool(WRITES)
-def create_section(parent_identifier: str, section_name: str) -> dict[str, Any]:
-    """Create a section under a notebook or section group."""
+def open_notebook(path: str) -> dict[str, Any]:
+    """Open an existing notebook folder (or a .one section file) in OneNote. Opening one that is already open is fine."""
 
-    return _create_container(parent_identifier, section_name, "section")
-
-
-@tool(WRITES)
-def create_section_group(parent_identifier: str, group_name: str) -> dict[str, Any]:
-    """Create a section group under a notebook or another section group."""
-
-    return _create_container(parent_identifier, group_name, "section_group")
-
-
-@tool(WRITES)
-def open_hierarchy(path: str, relative_to_identifier: str = "", create_type: str = "none") -> dict[str, Any]:
-    """Open a notebook folder, section file or section group, optionally creating it (create_type: none, notebook, section_group, section)."""
-
-    kind = create_type.strip().casefold() or "none"
-    relative_to = onenote.resolve(relative_to_identifier, full=True) if relative_to_identifier else None
-    if kind == "none":
-        expected = child_path(relative_to["path"], path) if relative_to else path.replace("\\", "/").strip("/")
-        existing = onenote.find(path=expected)
-        if existing:
-            return ok(object_id=existing["id"], item=existing, opened_existing=True)
-    result = onenote.call(
-        "open_hierarchy",
-        path=path,
-        relative_to_id=relative_to["id"] if relative_to else "",
-        create_file_type=enum_value("create_type", kind, CREATE_FILE_TYPES),
-    )
-    item = onenote.lookup(result["object_id"])
-    return ok(object_id=result["object_id"], item=item, opened_existing=False)
+    result = onenote.call("open_hierarchy", path=path, relative_to_id="", create_file_type=CREATE_FILE_TYPES["none"])
+    return ok(object_id=result["object_id"], item=onenote.lookup(result["object_id"]))
 
 
 @tool(WRITES)
@@ -101,31 +80,6 @@ def create_page(
     return ok(page_id=page_id, page=onenote.wait_for(item_type="page", id=page_id), title=title)
 
 
-@tool(WRITES)
-def update_page_title(page_identifier: str, title: str) -> dict[str, Any]:
-    """Change a page's title."""
-
-    page_id = onenote.resolve(page_identifier, "page")["id"]
-    onenote.update_page(build_page_update_xml(page_id, title=title))
-    return ok(page_id=page_id, title=title)
-
-
-@tool(WRITES)
-def append_to_page(
-    page_identifier: str,
-    content: str,
-    content_format: str = "plain",
-    x: float | None = None,
-    y: float | None = None,
-) -> dict[str, Any]:
-    """Add a new block below the page's existing content (or at x/y). content_format: plain, html, markdown."""
-
-    page_id = onenote.resolve(page_identifier, "page")["id"]
-    x, y = below_existing(page_id, x, y)
-    onenote.update_page(build_page_update_xml(page_id, content=content, content_format=content_format, x=x, y=y))
-    return ok(page_id=page_id, appended=True)
-
-
 def _local_file(path: str) -> Path:
     file = Path(path).expanduser()
     if not file.is_file():
@@ -134,51 +88,55 @@ def _local_file(path: str) -> Path:
 
 
 @tool(WRITES)
-def add_image_to_page(
+def append_to_page(
     page_identifier: str,
-    image_path: str,
-    image_format: str = "",
+    content: str = "",
+    content_format: str = "plain",
+    image_path: str = "",
+    file_path: str = "",
+    display_name: str = "",
     x: float | None = None,
     y: float | None = None,
     width: float | None = None,
     height: float | None = None,
 ) -> dict[str, Any]:
-    """Add a local image below the page's content (or at x/y). Give width or height alone to scale proportionally."""
+    """Add one new block below the page's existing content (or at x/y): text, an image, or an attached file.
 
-    file = _local_file(image_path)
-    fmt = image_format or file.suffix.lstrip(".")
-    if not fmt:
-        raise ValueError("image_format is required when image_path has no extension.")
-    width, height = proportional_dimensions(file, width, height)
+    Give exactly one of content (with content_format plain, html or markdown), image_path (a local image; width or
+    height alone scales it proportionally) or file_path (any local file, shown as a file icon named display_name).
+    To change existing text use edit_page.
+    """
+
+    given = [name for name, value in (("content", content), ("image_path", image_path), ("file_path", file_path)) if value]
+    if len(given) != 1:
+        raise ValueError("Give exactly one of content, image_path or file_path.")
     page_id = onenote.resolve(page_identifier, "page")["id"]
+    if image_path:
+        file = _local_file(image_path)
+        fmt = file.suffix.lstrip(".")
+        if not fmt:
+            raise ValueError("image_path needs a file extension (png, jpg, gif, ...).")
+        width, height = proportional_dimensions(file, width, height)
+        x, y = below_existing(page_id, x, y)
+        data = base64.b64encode(file.read_bytes()).decode("ascii")
+        onenote.update_page(build_image_page_update_xml(page_id, image_base64=data, image_format=fmt, x=x, y=y, width=width, height=height))
+        return ok(page_id=page_id, image_path=str(file), width=width, height=height)
+    if file_path:
+        file = _local_file(file_path)
+        x, y = below_existing(page_id, x, y)
+        onenote.update_page(build_file_page_update_xml(page_id, path=str(file), name=display_name or file.name, x=x, y=y))
+        return ok(page_id=page_id, file=str(file), name=display_name or file.name)
     x, y = below_existing(page_id, x, y)
-    data = base64.b64encode(file.read_bytes()).decode("ascii")
-    onenote.update_page(build_image_page_update_xml(page_id, image_base64=data, image_format=fmt, x=x, y=y, width=width, height=height))
-    return ok(page_id=page_id, image_path=str(file), width=width, height=height)
-
-
-@tool(WRITES)
-def add_file_to_page(
-    page_identifier: str,
-    file_path: str,
-    display_name: str = "",
-    x: float | None = None,
-    y: float | None = None,
-) -> dict[str, Any]:
-    """Attach a local file (PDF, document, archive, ...) to a page as a file icon, below the existing content unless x/y are given."""
-
-    file = _local_file(file_path)
-    page_id = onenote.resolve(page_identifier, "page")["id"]
-    x, y = below_existing(page_id, x, y)
-    onenote.update_page(build_file_page_update_xml(page_id, path=str(file), name=display_name or file.name, x=x, y=y))
-    return ok(page_id=page_id, file=str(file), name=display_name or file.name)
+    onenote.update_page(build_page_update_xml(page_id, content=content, content_format=content_format, x=x, y=y))
+    return ok(page_id=page_id, appended=True)
 
 
 @tool(DESTRUCTIVE)
 def edit_page(page_identifier: str, operations: list[EditOperation]) -> dict[str, Any]:
     """Change parts of a page without touching the rest (images, handwriting, attachments and other blocks stay as they are).
 
-    Get paragraph IDs from get_page(include_paragraphs=true). Operations run in order in one update, e.g.
+    Get paragraph IDs from get_page(include_paragraphs=true). op="delete" also takes the object_id of a whole
+    block, image, ink drawing or attachment from get_page(include_objects=true). Operations run in order in one update, e.g.
     [{"op": "replace_text", "find": "2025", "replace": "2026"},
      {"op": "insert_after", "paragraph_id": "...", "content": "- new item"},
      {"op": "set_todo", "paragraph_id": "...", "done": true}].
@@ -195,10 +153,14 @@ def edit_page(page_identifier: str, operations: list[EditOperation]) -> dict[str
     results = [editor.apply(op) for op in ops]
     update, emptied = editor.build_update(page_id), editor.empty_outlines()
     touched = {outline.attrib["objectID"] for outline in editor.touched if outline.attrib.get("objectID")}
-    backup_id = snapshot_blocks(page_id, original, touched, "edit_page")
+    removed = [node.attrib["objectID"] for node in editor.removed]
+    if any(node.tag != ONE + "Outline" for node in editor.removed):
+        backup_id = snapshot(page_id, "edit_page")
+    else:
+        backup_id = snapshot_blocks(page_id, original, touched | set(removed), "edit_page")
     if update:
         onenote.update_page(update)
-    for object_id in emptied:
+    for object_id in emptied + removed:
         onenote.delete_object(page_id, object_id)
     paragraphs = PageEditor(parse_xml(onenote.page_xml(page_id))).paragraphs()
     return ok(page_id=page_id, results=results, backup_id=backup_id, paragraphs=paragraphs)
@@ -212,6 +174,7 @@ def replace_page_body(
     content_format: str = "plain",
 ) -> dict[str, Any]:
     """Replace everything on a page (text, images, ink, attachments) with new content. Prefer edit_page for partial changes.
+    title=None keeps the current title.
 
     The new content is written before the old objects are deleted, and a backup is saved first.
     """
@@ -226,32 +189,18 @@ def replace_page_body(
 
 
 @tool(DESTRUCTIVE)
-def delete_page_content(page_identifier: str, object_id: str) -> dict[str, Any]:
-    """Delete one outline, image, ink drawing or attachment from a page. Get object IDs from get_page(include_objects=true).
+def submit_xml(xml: str, force: bool = False) -> dict[str, Any]:
+    """Advanced: submit raw OneNote XML. A <one:Page> goes to UpdatePageContent (the page is backed up first);
+    a <one:Notebooks>, <one:Notebook>, <one:SectionGroup> or <one:Section> goes to UpdateHierarchy."""
 
-    To delete single paragraphs use edit_page. A backup is saved first.
-    """
-
-    page_id = onenote.resolve(page_identifier, "page")["id"]
-    match = next((obj for obj in collect_page_objects(onenote.page_xml(page_id)) if obj.get("object_id") == object_id), None)
-    if match is None:
-        raise ValueError(f"Object '{object_id}' is not on this page.")
-    if not match["delete_supported"]:
-        hint = f" Delete its block '{match['delete_object_id']}', or use edit_page op=delete." if match.get("delete_object_id") else ""
-        raise ValueError(f"'{object_id}' is a {match['type']} inside a block and cannot be deleted on its own.{hint}")
-    backup_id = snapshot(page_id, "delete_page_content")
-    onenote.delete_object(page_id, object_id)
-    return ok(page_id=page_id, object_id=object_id, backup_id=backup_id)
-
-
-@tool(DESTRUCTIVE)
-def update_page_xml(xml: str, force: bool = False) -> dict[str, Any]:
-    """Advanced: submit raw OneNote page XML to UpdatePageContent. A backup of the page is saved first."""
-
-    page_id = parse_xml(xml).attrib.get("ID", "")
-    backup_id = snapshot(page_id, "update_page_xml") if page_id else None
+    root = parse_xml(xml)
+    if root.tag != ONE + "Page":
+        onenote.call("update_hierarchy", xml=xml, schema=XML_SCHEMA_2013)
+        return ok(updated="hierarchy")
+    page_id = root.attrib.get("ID", "")
+    backup_id = snapshot(page_id, "submit_xml") if page_id else None
     onenote.update_page(xml, force=force)
-    return ok(page_id=page_id, backup_id=backup_id)
+    return ok(updated="page", page_id=page_id, backup_id=backup_id)
 
 
 @tool(WRITES)

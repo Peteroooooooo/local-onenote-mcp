@@ -100,6 +100,11 @@ def test_html_writer_drops_scripts_and_unsafe_links():
     assert "ok" in xml and "text-decoration:line-through" in xml
 
 
+def test_html_paragraph_style_reaches_each_line():
+    texts = _texts(html_to_oe_xml('<p style="color:red">one<br>two</p>'))
+
+    assert texts == ['<span style="color:red">one</span>', '<span style="color:red">two</span>']
+
 def test_image_and_file_xml():
     image = build_image_page_update_xml("p", image_base64="abc", image_format="PNG", width=320, height=180)
     attached = build_file_page_update_xml("p", path='C:/a "b".pdf', name="b.pdf", x=36, y=200)
@@ -173,6 +178,24 @@ def test_reader_renders_lists_tables_and_image_ocr_as_markdown():
     assert "| H |\n| --- |\n| a\\|b |" in text
     assert "> scanned words" in text
     assert "scanned words" not in render_page(xml, "text", include_ocr=False)
+
+
+def test_reader_merges_font_runs_before_adding_marks():
+    yahei, latin = "font-family:\"Microsoft YaHei\"", "font-family:Calibri"
+    xml = (
+        f'<one:Page {NS} ID="p"><one:QuickStyleDef index="0" name="quote" italic="true"/>'
+        "<one:Outline><one:OEChildren>"
+        f"<one:OE quickStyleIndex='0'><one:T><![CDATA[<span style='{yahei};font-style:italic'>第三方</span>"
+        f"<span style='{latin};font-style:italic'> API </span><span style='{yahei};font-style:italic'>限流</span>]]></one:T></one:OE>"
+        f"<one:OE><one:T><![CDATA[<span style='{yahei};text-decoration:line-through'>删除线</span>"
+        f"<span style='{latin};text-decoration:line-through'> </span><span style='{yahei}'>和 </span>"
+        f"<span style='{yahei};font-weight:bold'>粗</span><span style='{latin};font-weight:bold'>体</span>]]></one:T></one:OE>"
+        "<one:OE><one:List><one:Number text='1.'/></one:List><one:T><![CDATA[step]]></one:T>"
+        "<one:OEChildren><one:OE><one:List><one:Bullet bullet='2'/></one:List><one:T><![CDATA[detail]]></one:T></one:OE></one:OEChildren></one:OE>"
+        "</one:OEChildren></one:Outline></one:Page>"
+    )
+
+    assert render_page(xml, "markdown").split("\n") == ["> 第三方 API 限流", "~~删除线~~ 和 **粗体**", "1. step", "   - detail"]
 
 
 def test_reader_uses_recognised_ink_text_and_labels_the_rest():

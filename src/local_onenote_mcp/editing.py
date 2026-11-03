@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 
 from .constants import ONE, ONE_NS
 from .markup import StyleSet, html_to_inline, markdown_to_html
-from .pagexml import attr, content_format, content_to_oe_xml, definitions
+from .pagexml import BODY_TYPES, attr, content_format, content_to_oe_xml, definitions
 from .reader import inline_text
 
 TODO_NAMES = {"to do", "待办事项", "待办"}
@@ -33,7 +33,7 @@ class EditOperation(BaseModel):
             "replace_text: find/replace across the page body, formatting kept. "
             "set_text: replace one paragraph's text, keeping its bullet, number, to-do box and style. "
             "insert_after / insert_before: add content (any length, any format) next to a paragraph. "
-            "delete: remove a paragraph and its indented children. "
+            "delete: remove a paragraph and its indented children, or a whole block, image, ink drawing or attachment by its object_id. "
             "set_todo: tick or untick a paragraph's to-do box, adding one if it has none. "
             "add_row: add a table row after the row holding paragraph_id (or at the end, given the table's own paragraph). "
             "delete_row: remove the table row holding paragraph_id."
@@ -69,6 +69,7 @@ class PageEditor:
         self.tag_names = {node.attrib.get("index"): node for node in page if node.tag == ONE + "TagDef"}
         self.quick_names = {node.attrib.get("index"): node.attrib.get("name", "") for node in page if node.tag == ONE + "QuickStyleDef"}
         self.touched: list[ET.Element] = []
+        self.removed: list[ET.Element] = []
         self._index: dict[str, _Located] = {}
         for outline in page.findall(ONE + "Outline"):
             self._walk(outline.find(ONE + "OEChildren"), outline)
@@ -78,7 +79,12 @@ class PageEditor:
             return
         for oe in container.findall(ONE + "OE"):
             if oe.attrib.get("objectID"):
-                self._index[oe.attrib["objectID"]] = _Located(oe, container, outline, table, row)
+                located = _Located(oe, container, outline, table, row)
+                self._index[oe.attrib["objectID"]] = located
+                # An image, ink or file inside a paragraph is reached through its own object_id too.
+                for child in oe:
+                    if child.attrib.get("objectID") and child.tag != ONE + "Table":
+                        self._index.setdefault(child.attrib["objectID"], located)
             self._walk(oe.find(ONE + "OEChildren"), outline, table, row)
             inner = oe.find(ONE + "Table")
             if inner is not None:
@@ -143,10 +149,13 @@ class PageEditor:
             count = self.replace_text(op.find, op.replace, op.max_count)
             if count == 0:
                 raise ValueError(
-                    f"Text '{op.find}' was not found. Matches must lie inside one formatting run; "
-                    "use set_text on the paragraph for text that spans bold/italic boundaries."
+                    f"Text '{op.find}' was not found. Matches stay inside one paragraph; "
+                    "use set_text to rewrite a paragraph."
                 )
             return {"op": op.op, "replacements": count}
+        if op.op == "delete" and op.paragraph_id not in self._index:
+            self.remove_object(op.paragraph_id)
+            return {"op": op.op, "object_id": op.paragraph_id}
         located = self._locate(op.paragraph_id)
         if op.op == "set_text":
             self.set_text(located, op.content, op.content_format)
@@ -165,11 +174,14 @@ class PageEditor:
 
     def _locate(self, paragraph_id: str) -> _Located:
         located = self._index.get(paragraph_id)
-        attached = located is not None and located.oe in list(located.parent)
+        attached = located is not None and located.oe in list(located.parent) and located.outline not in self.removed
         if attached and located.row is not None:
             attached = located.row in list(located.table)
         if not attached:
-            raise ValueError(f"Paragraph '{paragraph_id}' is not on this page (deleted earlier in this edit, or a wrong ID).")
+            raise ValueError(
+                f"Paragraph '{paragraph_id}' is not on this page (deleted earlier in this edit, or a wrong ID). "
+                "IDs come from get_page(include_paragraphs=true)."
+            )
         return located
 
     def _touch(self, outline: ET.Element) -> None:
@@ -217,6 +229,15 @@ class PageEditor:
         else:
             located.parent.remove(located.oe)
         self._touch(located.outline)
+
+    def remove_object(self, object_id: str) -> None:
+        """Delete a whole block, image, ink drawing or attachment placed directly on the page."""
+
+        node = next((child for child in self.page if child.attrib.get("objectID") == object_id and child.tag.removeprefix(ONE) in BODY_TYPES), None)
+        if node is None:
+            raise ValueError(f"'{object_id}' is not a paragraph or object on this page (deleted earlier in this edit, or a wrong ID).")
+        self.page.remove(node)
+        self.removed.append(node)
 
     def add_row(self, located: _Located, cells: list[str], fmt: str) -> None:
         table, anchor = located.table, located.row
@@ -268,12 +289,15 @@ class PageEditor:
 
         return [
             outline.attrib["objectID"]
-            for outline in self.touched
+            for outline in self._changed()
             if outline.attrib.get("objectID") and not outline.find(ONE + "OEChildren").findall(ONE + "OE")
         ]
 
+    def _changed(self) -> list[ET.Element]:
+        return [outline for outline in self.touched if outline not in self.removed]
+
     def build_update(self, page_id: str) -> str | None:
-        outlines = [outline for outline in self.touched if outline.find(ONE + "OEChildren").findall(ONE + "OE")]
+        outlines = [outline for outline in self._changed() if outline.find(ONE + "OEChildren").findall(ONE + "OE")]
         if not outlines:
             return None
         body = "".join(ET.tostring(outline, encoding="unicode") for outline in outlines)
@@ -291,21 +315,44 @@ _TAG_SPLIT = re.compile(r"(<[^>]*>)")
 
 
 def _replace_in_fragment(fragment: str, find: str, replace: str, limit: int) -> tuple[str, int]:
-    """Replace text inside the text runs of an inline HTML fragment, never inside tags."""
+    """Replace text inside an inline HTML fragment, never inside tags.
 
-    total = 0
+    OneNote splits text into runs whenever the font changes (Chinese and Latin text get separate runs), so a
+    match may span runs. The replacement takes the formatting of the run where the match starts.
+    """
+
     parts = _TAG_SPLIT.split(fragment)
+    texts = {index: html.unescape(part) for index, part in enumerate(parts) if part and not part.startswith("<")}
+    owners: list[tuple[int, int] | None] = []
     for index, part in enumerate(parts):
-        if not part or part.startswith("<"):
-            continue
-        plain = html.unescape(part)
-        if find not in plain:
-            continue
-        allowed = plain.count(find) if not limit else min(plain.count(find), limit - total)
-        if allowed <= 0:
+        if index in texts:
+            owners.extend((index, offset) for offset in range(len(texts[index])))
+        elif part.lower().startswith("<br"):
+            owners.append(None)
+    joined = "".join(texts[owner[0]][owner[1]] if owner else "\n" for owner in owners)
+    starts, removed, position, total = set(), set(), 0, 0
+    while not limit or total < limit:
+        start = joined.find(find, position)
+        if start < 0:
             break
-        parts[index] = html.escape(plain.replace(find, replace, allowed), quote=False)
-        total += allowed
-        if limit and total >= limit:
-            break
+        if None in owners[start : start + len(find)]:
+            position = start + 1
+            continue
+        starts.add(start)
+        removed.update(range(start, start + len(find)))
+        position, total = start + len(find), total + 1
+    if not total:
+        return fragment, 0
+    rebuilt = {index: [] for index in texts}
+    for place, owner in enumerate(owners):
+        if owner is None:
+            continue
+        index, offset = owner
+        if place in starts:
+            rebuilt[index].append(replace)
+        if place not in removed:
+            rebuilt[index].append(texts[index][offset])
+    changed = {owners[place][0] for place in removed if owners[place]}
+    for index in changed:
+        parts[index] = html.escape("".join(rebuilt[index]), quote=False)
     return "".join(parts), total

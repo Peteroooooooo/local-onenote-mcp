@@ -56,7 +56,7 @@ def backups_on(monkeypatch, tmp_path):
 def test_every_tool_is_registered_with_annotations():
     tools = {tool.name: tool for tool in app.mcp._tool_manager.list_tools()}
 
-    assert len(tools) == 41
+    assert len(tools) == 26
     assert tools["edit_page"].annotations.destructiveHint is True
     assert tools["get_page"].annotations.readOnlyHint is True
     assert tools["view_page"].annotations.readOnlyHint is True
@@ -104,16 +104,64 @@ def test_edit_page_validates_before_writing(fake):
     assert result["ok"] is False and bridge.updates == []
 
 
-def test_delete_page_content_points_paragraphs_to_their_block(fake):
-    fake()
-    result = run(writing.delete_page_content, PAGE, "a")
+def test_edit_page_deletes_page_objects_with_a_whole_page_backup(fake, backups_on):
+    bridge = fake()
+    result = run(writing.edit_page, PAGE, [{"op": "delete", "paragraph_id": "img"}, {"op": "set_text", "paragraph_id": "c", "content": "x"}])
 
-    assert result["ok"] is False and "o1" in result["error"]
+    assert result["ok"] is True and bridge.deleted == ["img"]
+    assert run(writing.list_backups, PAGE)["backups"][0]["kind"] == "page"
+    assert 'objectID="img"' not in bridge.updates[0]
+    assert run(writing.edit_page, PAGE, [{"op": "delete", "paragraph_id": "nothing"}])["ok"] is False
+
+
+def test_deleting_a_whole_text_block_keeps_a_blocks_backup(fake, backups_on):
+    bridge = fake()
+    result = run(writing.edit_page, PAGE, [{"op": "delete", "paragraph_id": "o2"}])
+
+    assert bridge.updates == [] and bridge.deleted == ["o2"]
+    _meta, saved, _files = app.backups.load(result["backup_id"])
+    assert [node.attrib["objectID"] for node in saved.findall(ONE + "Outline")] == ["o2"]
+
+
+def test_append_to_page_takes_exactly_one_kind_of_content(fake, tmp_path):
+    bridge = fake()
+    attachment = tmp_path / "notes.txt"
+    attachment.write_text("x")
+
+    assert run(writing.append_to_page, PAGE)["ok"] is False
+    assert run(writing.append_to_page, PAGE, content="a", file_path=str(attachment))["ok"] is False
+    assert run(writing.append_to_page, PAGE, file_path=str(attachment), display_name="Notes")["ok"] is True
+    assert 'preferredName="Notes"' in bridge.updates[-1]
+
+
+def test_list_hierarchy_filters_by_type_and_keeps_full_paths(fake):
+    fake()
+    pages = run(reading.list_hierarchy, "NB/Sec", item_type="page")["items"]
+    overview = run(reading.list_hierarchy)["items"]
+
+    assert [page["path"] for page in pages] == ["NB/Sec/Plan", "NB/Sec/Old", "NB/Sec/New"]
+    assert all(page["parent_id"] == SEC for page in pages)
+    assert [item["type"] for item in overview] == ["notebook", "section"]
+
+
+def test_submit_xml_routes_pages_and_hierarchy(fake):
+    bridge = fake()
+    run(writing.submit_xml, f'<one:Page xmlns:one="{NS}" ID="{PAGE}"/>')
+    run(writing.submit_xml, f'<one:Notebooks xmlns:one="{NS}"/>')
+
+    assert len(bridge.updates) == 1 and len(bridge.submitted) == 1
+
+
+def test_rename_item_renames_pages_through_their_title(fake):
+    bridge = fake()
+    result = run(organizing.rename_item, PAGE, "New title")
+
+    assert result["ok"] is True and "New title" in bridge.updates[-1]
 
 
 def test_whole_page_backup_restores_as_new_page_and_in_place(fake, backups_on):
     bridge = fake()
-    deleted = run(writing.delete_page_content, PAGE, "img")
+    deleted = run(writing.edit_page, PAGE, [{"op": "delete", "paragraph_id": "img"}])
     listed = run(writing.list_backups, PAGE)
 
     assert isinstance(deleted["backup_id"], int)
@@ -223,8 +271,8 @@ def test_transient_class_not_registered_is_retried_for_safe_calls(fake, monkeypa
     monkeypatch.setattr(bridge, "call", flaky)
     monkeypatch.setattr("local_onenote_mcp.onenote.time.sleep", lambda seconds: None)
 
-    assert run(reading.list_notebooks)["ok"] is True
-    assert run(writing.update_page_title, PAGE, "x")["ok"] is False
+    assert run(reading.list_hierarchy)["ok"] is True
+    assert run(organizing.rename_item, PAGE, "x")["ok"] is False
     assert bridge.updates == []
 
 
@@ -304,13 +352,13 @@ def test_move_page_rejects_its_own_subpage_as_anchor(fake):
     assert result["ok"] is False and "cannot be the page being moved" in result["error"]
 
 
-def test_set_page_level_needs_a_parent_page(fake):
-    bridge = fake(_section(("A", 1), ("B", 1)), {})
+def test_move_page_level_alone_indents_in_place(fake):
+    bridge = fake(_section(("A", 1), ("B", 1), ("B1", 2)), {})
 
-    assert run(organizing.set_page_level, "A", 2)["ok"] is False
-    assert run(organizing.set_page_level, "B", 3)["ok"] is False
-    assert run(organizing.set_page_level, "B", 2)["ok"] is True
-    assert _order(bridge.submitted[0]) == [("A", "1"), ("B", "2")]
+    assert run(organizing.move_page, "A", level=2)["ok"] is False
+    assert run(organizing.move_page, "B", level=3)["ok"] is False
+    assert run(organizing.move_page, "B", level=2)["ok"] is True
+    assert _order(bridge.submitted[0]) == [("A", "1"), ("B", "2"), ("B1", "3")]
 
 
 def test_move_section_refuses_name_clash_and_moving_into_itself(fake):
@@ -330,8 +378,8 @@ def test_move_section_refuses_name_clash_and_moving_into_itself(fake):
     assert bridge.submitted == []
 
 
-def test_delete_hierarchy_refuses_notebooks(fake):
+def test_delete_item_refuses_notebooks(fake):
     fake()
-    result = run(organizing.delete_hierarchy, NB)
+    result = run(organizing.delete_item, NB)
 
     assert result["ok"] is False and "close_notebook" in result["error"]

@@ -16,7 +16,7 @@ from ..app import READ_ONLY, backups, indexer, ok, onenote, settings, text_index
 from ..backup import FILE_TAGS
 from ..constants import PUBLISH_FORMATS, SPECIAL_LOCATIONS, XML_SCHEMA_2013
 from ..editing import PageEditor
-from ..hierarchy import of_type, parse_hierarchy, parse_xml, resolve_item, without_recycle_bin
+from ..hierarchy import of_type, parse_hierarchy, parse_xml, without_recycle_bin
 from ..pages import file_bytes
 from ..pagexml import collect_page_objects
 from ..reader import page_title, render_page
@@ -25,6 +25,7 @@ from .. import search
 MAX_IMAGE_BYTES = 3_500_000
 IDENTIFIER_TYPES = {"notebook", "section_group", "section", "page"}
 SEARCH_BACKENDS = {"auto", "index", "local_scan"}
+LINK_OPERATIONS = {"onenote": "get_hyperlink", "web": "get_web_hyperlink"}
 
 
 def _truncate(text: str, max_chars: int) -> str:
@@ -65,69 +66,57 @@ def health_check() -> dict[str, Any]:
 
 
 @tool(READ_ONLY)
-def resolve_identifier(identifier: str, item_type: str = "") -> dict[str, Any]:
-    """Resolve an ID, exact path ("Notebook/Section/Page") or unique name to one live object."""
+def resolve_identifier(identifier: str, item_type: str = "", link: str = "", paragraph_id: str = "") -> dict[str, Any]:
+    """Resolve an ID, exact path ("Notebook/Section/Page") or unique name to one live object.
+
+    link="onenote" adds a onenote: link to it (link="web": a browser link, cloud notebooks only); with paragraph_id
+    the link points at that paragraph of the page.
+    """
 
     kind = item_type.strip().casefold() or None
     if kind and kind not in IDENTIFIER_TYPES:
         raise ValueError(f"item_type must be empty or one of: {', '.join(sorted(IDENTIFIER_TYPES))}")
-    return ok(item=onenote.resolve(identifier, kind, full=True))
-
-
-@tool(READ_ONLY)
-def list_notebooks() -> dict[str, Any]:
-    """List the notebooks open in OneNote."""
-
-    notebooks = of_type(onenote.items("", "notebooks"), "notebook")
-    return ok(notebooks=notebooks, count=len(notebooks))
-
-
-@tool(READ_ONLY)
-def list_sections(notebook_identifier: str = "", include_recycle_bin: bool = False) -> dict[str, Any]:
-    """List sections (with their section-group paths), optionally only those in one notebook."""
-
-    items = onenote.items("", "sections")
-    if not include_recycle_bin:
-        items = without_recycle_bin(items)
-    sections = of_type(items, "section")
-    if notebook_identifier:
-        prefix = resolve_item(items, notebook_identifier, "notebook")["path"] + "/"
-        sections = [section for section in sections if section["path"].startswith(prefix)]
-    return ok(sections=sections, count=len(sections))
-
-
-@tool(READ_ONLY)
-def list_pages(section_identifier: str, include_recycle_bin: bool = False) -> dict[str, Any]:
-    """List the pages of a section in order. pageLevel 2/3 marks subpages."""
-
-    section = onenote.resolve(section_identifier, "section", full=True)
-    pages = of_type(parse_hierarchy(onenote.hierarchy_xml(section["id"], "pages")), "page")
-    if not include_recycle_bin:
-        pages = without_recycle_bin(pages)
-    for page in pages:
-        page["path"] = f"{section['path']}/{page['name']}"
-        page["parent_id"] = section["id"]
-        page["notebook_name"] = section.get("notebook_name")
-        page["section_name"] = section.get("name")
-    return ok(section=section, pages=pages, count=len(pages))
+    item = onenote.resolve(identifier, kind, full=True)
+    data = ok(item=item)
+    if link:
+        operation = LINK_OPERATIONS.get(link.strip().casefold())
+        if operation is None:
+            raise ValueError("link must be empty, 'onenote' or 'web'.")
+        data["hyperlink"] = onenote.call(operation, object_id=item["id"], page_content_object_id=paragraph_id)["hyperlink"]
+    return data
 
 
 @tool(READ_ONLY)
 def list_hierarchy(
     start_identifier: str = "",
-    scope: str = "pages",
+    item_type: str = "",
     include_recycle_bin: bool = False,
     max_items: int = 500,
 ) -> dict[str, Any]:
-    """List notebooks, section groups, sections and (scope="pages") pages below a starting point.
+    """List notebooks, section groups, sections and pages, in OneNote's order.
 
-    max_items caps the list (0 = no cap); use scope="sections" or a start_identifier for large collections.
+    item_type="notebook" / "section" / "section_group" / "page" keeps only that type. Without a start_identifier
+    and item_type, the list stops at sections; give a notebook, group or section (or item_type="page") to see pages.
+    Pages carry pageLevel (2/3 = subpage). max_items caps the list (0 = no cap).
     """
 
-    start_id = onenote.resolve(start_identifier)["id"] if start_identifier else ""
-    items = onenote.items(start_id, scope)
+    kind = item_type.strip().casefold()
+    if kind and kind not in IDENTIFIER_TYPES:
+        raise ValueError(f"item_type must be empty or one of: {', '.join(sorted(IDENTIFIER_TYPES))}")
+    start = onenote.resolve(start_identifier, full=True) if start_identifier else None
+    scope = "notebooks" if kind == "notebook" else "pages" if kind == "page" or start else "sections"
+    items = onenote.items(start["id"] if start else "", scope)
+    if start:
+        # Paths below a starting point are relative to it; make them full again.
+        prefix = start["path"].rpartition("/")[0]
+        for item in items:
+            item["path"] = f"{prefix}/{item['path']}" if prefix else item["path"]
+            item["notebook_name"] = item.get("notebook_name") or start.get("notebook_name")
+            item["parent_id"] = item.get("parent_id") or start.get("parent_id")
     if not include_recycle_bin:
         items = without_recycle_bin(items)
+    if kind:
+        items = of_type(items, kind)
     total = len(items)
     if max_items > 0:
         items = items[:max_items]
@@ -148,9 +137,9 @@ def get_page(
 
     format="text" gives plain text; format="markdown" keeps headings, bold/italic, links, lists, to-dos and tables.
     include_ocr adds the text OneNote recognised inside images.
-    include_paragraphs lists every paragraph with its id, text, depth, list type, style and to-do state; use those ids
-    with edit_page. include_objects lists outlines, images, ink and attachments with object_id (for
-    delete_page_content) and callback_id (for get_page_image / get_binary_content). include_xml adds the raw XML.
+    include_paragraphs lists every paragraph (table cells too) with its id, text, depth, list type, style and to-do
+    state; use those ids with edit_page. include_objects lists outlines, images, ink and attachments with object_id
+    (edit_page can delete them) and callback_id (for view_page / get_binary_content). include_xml adds the raw XML.
     """
 
     fmt = _read_format(format)
@@ -195,26 +184,21 @@ def _binary(page_identifier: str, callback_id: str = "", file_name: str = "") ->
 
 
 @tool(READ_ONLY, structured=False)
-def get_page_image(page_identifier: str, callback_id: str) -> Any:
-    """Show an image from a page to the model. Take callback_id from get_page(include_objects=true)."""
-
-    raw = _binary(page_identifier, callback_id)
-    fmt = _image_format(raw)
-    if fmt is None:
-        raise ValueError("This object is not a PNG, JPEG, GIF or WebP image; use get_binary_content to download it.")
-    if len(raw) > MAX_IMAGE_BYTES:
-        raise ValueError(f"Image is {len(raw) // 1024} KB, above the {MAX_IMAGE_BYTES // 1024} KB inline limit; use get_binary_content.")
-    return Image(data=raw, format=fmt)
-
-
-@tool(READ_ONLY, structured=False)
-def view_page(page_identifier: str, max_pages: int = 3, width: int = 1000) -> Any:
+def view_page(page_identifier: str, callback_id: str = "", max_pages: int = 3, width: int = 1000) -> Any:
     """Show a page to the model as it looks in OneNote, including handwriting, drawings and layout.
 
     The page is printed to PDF and each printed (A4) page becomes one JPEG image, width pixels wide.
-    Use it for pages whose ink or layout get_page cannot put into text.
+    With callback_id (from get_page(include_objects=true)) only that image of the page is shown, at full size.
     """
 
+    if callback_id:
+        raw = _binary(page_identifier, callback_id)
+        fmt = _image_format(raw)
+        if fmt is None:
+            raise ValueError("This object is not a PNG, JPEG, GIF or WebP image; use get_binary_content to download it.")
+        if len(raw) > MAX_IMAGE_BYTES:
+            raise ValueError(f"Image is {len(raw) // 1024} KB, above the {MAX_IMAGE_BYTES // 1024} KB inline limit; use get_binary_content.")
+        return Image(data=raw, format=fmt)
     page_id = onenote.resolve(page_identifier, "page")["id"]
     pdf = Path(tempfile.gettempdir()) / f"local-onenote-mcp-{uuid.uuid4().hex}.pdf"
     try:
@@ -313,12 +297,3 @@ def search_pages(
             except Exception as exc:
                 page["snippet_error"] = str(exc)
     return ok(count=len(data["pages"]), **data)
-
-
-@tool(READ_ONLY)
-def get_hyperlink(object_identifier: str, page_content_object_id: str = "", web: bool = False) -> dict[str, Any]:
-    """A onenote: link (or, with web=true, a browser link) to a notebook, section, page or paragraph."""
-
-    object_id = onenote.resolve(object_identifier)["id"]
-    operation = "get_web_hyperlink" if web else "get_hyperlink"
-    return ok(hyperlink=onenote.call(operation, object_id=object_id, page_content_object_id=page_content_object_id)["hyperlink"])

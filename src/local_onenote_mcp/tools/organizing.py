@@ -8,9 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from ..app import DESTRUCTIVE, WRITES, ok, onenote, tool
-from ..constants import ONE, XML_SCHEMA_2013
+from ..constants import ONE
 from ..hierarchy import Item, in_recycle_bin, of_type, parse_hierarchy, safe_leaf_name
 from ..pages import snapshot
+from ..pagexml import build_page_update_xml
 
 FILE_MOVE_WAIT_SECONDS = 20.0
 
@@ -72,15 +73,24 @@ def move_page(
     after_page_identifier: str = "",
     to_top: bool = False,
     include_subpages: bool = True,
+    level: int = 0,
 ) -> dict[str, Any]:
-    """Move a page to another section (any notebook) or to a new position in its own section.
+    """Move a page to another section (any notebook) or to a new position in its own section, and/or indent it.
 
     Leave destination_section_identifier empty to reorder within the current section. The page goes after
     after_page_identifier, to the top with to_top=true, or to the end. Its subpages move with it unless
-    include_subpages=false, and it becomes a top-level page (set_page_level indents it).
+    include_subpages=false. A moved page becomes a top-level page unless level is given.
+    level=2 or 3 makes the page a subpage of the page above it, level=1 promotes it; with only level given the
+    page stays where it is.
     Moving to another section gives the pages new IDs; the old-to-new mapping is returned.
     """
 
+    if level not in {0, 1, 2, 3}:
+        raise ValueError("level must be 1, 2 or 3 (0 = leave as moved).")
+    if level and not (destination_section_identifier or after_page_identifier or to_top):
+        page = onenote.resolve(page_identifier, "page", full=True)
+        _set_level(page["id"], page["parent_id"], level)
+        return ok(page_id=page["id"], level=level)
     page = _live(page_identifier, "page")
     source_id = page["parent_id"]
     destination_id = _live(destination_section_identifier, "section")["id"] if destination_section_identifier else source_id
@@ -130,24 +140,24 @@ def move_page(
                 f"{len(left)} still in the source)."
             )
     moved = [{"old_id": old, "new_id": new} for old, new in zip(block_ids, new_ids)]
+    if level > 1:
+        _set_level(new_ids[0], destination_id, level)
     return ok(page_id=new_ids[0], page=onenote.lookup(new_ids[0]), moved_pages=moved, destination_section_id=destination_id)
 
 
-@tool(WRITES)
-def set_page_level(page_identifier: str, level: int) -> dict[str, Any]:
-    """Indent a page as a subpage (level 2 or 3) or promote it back to a top-level page (level 1)."""
+def _set_level(page_id: str, section_id: str, level: int) -> None:
+    """Indent a page (its subpages keep their depth below it) or promote it to level 1."""
 
-    if level not in {1, 2, 3}:
-        raise ValueError("level must be 1, 2 or 3.")
-    page = onenote.resolve(page_identifier, "page", full=True)
-    tree = onenote.tree(page["parent_id"], "pages")
+    tree = onenote.tree(section_id, "pages")
     pages = _pages(tree)
-    index = _index_of(pages, page["id"])
+    index = _index_of(pages, page_id)
     if level > 1 and (index == 0 or _level(pages[index - 1]) < level - 1):
         raise ValueError("A subpage needs a page directly above it one level higher; move the page first.")
-    pages[index].set("pageLevel", str(level))
+    block = _block(pages, index)
+    shift = level - _level(pages[index])
+    for node in block:
+        node.set("pageLevel", str(min(3, max(1, _level(node) + shift))))
     onenote.submit_tree(tree)
-    return ok(page_id=page["id"], level=level)
 
 
 def _siblings(tree: ET.Element, tag: str) -> list[ET.Element]:
@@ -220,10 +230,15 @@ def move_section(
 
 
 @tool(WRITES)
-def rename_section(section_identifier: str, new_name: str) -> dict[str, Any]:
-    """Rename a section or section group. Rename pages with update_page_title."""
+def rename_item(identifier: str, new_name: str) -> dict[str, Any]:
+    """Rename a page (its title), a section or a section group."""
 
-    item = _container(section_identifier)
+    item = _live(identifier)
+    if item["type"] == "page":
+        onenote.update_page(build_page_update_xml(item["id"], title=new_name))
+        return ok(object_id=item["id"], name=new_name)
+    if item["type"] not in {"section", "section_group"}:
+        raise ValueError("Only pages, sections and section groups can be renamed here.")
     name = safe_leaf_name(new_name)
     tag = "Section" if item["type"] == "section" else "SectionGroup"
     parent = onenote.tree(item["parent_id"], "sections")
@@ -256,18 +271,18 @@ def _page_ids_under(item: Item) -> list[str]:
 
 
 @tool(DESTRUCTIVE)
-def delete_hierarchy(object_identifier: str, permanently: bool = False) -> dict[str, Any]:
-    """Delete a notebook's section group, a section or a page. permanently=false moves it to OneNote's recycle bin.
+def delete_item(identifier: str, permanently: bool = False) -> dict[str, Any]:
+    """Delete a page, a section or a section group. permanently=false moves it to OneNote's recycle bin.
 
     Pages are backed up before a delete; a permanently deleted section has each of its pages backed up.
     """
 
-    item = onenote.resolve(object_identifier, full=True)
+    item = onenote.resolve(identifier, full=True)
     if item["type"] == "notebook":
         raise ValueError("Notebooks are folders on disk; close them with close_notebook and delete the folder yourself.")
     backed_up = []
     if item["type"] == "page" or permanently:
-        backed_up = [backup for page_id in _page_ids_under(item) if (backup := snapshot(page_id, "delete_hierarchy")) is not None]
+        backed_up = [backup for page_id in _page_ids_under(item) if (backup := snapshot(page_id, "delete_item")) is not None]
 
     if item["type"] == "page":
         onenote.call("delete_hierarchy", object_id=item["id"], permanently=permanently)
@@ -289,11 +304,3 @@ def delete_hierarchy(object_identifier: str, permanently: bool = False) -> dict[
             return ok(deleted_ids=deleted, permanently=permanently, backup_ids=backed_up)
         item = remaining
     raise RuntimeError(f"Delete returned success, but '{item['path']}' still exists with ID {item['id']}.")
-
-
-@tool(DESTRUCTIVE)
-def update_hierarchy_xml(xml: str) -> dict[str, Any]:
-    """Advanced: submit raw OneNote hierarchy XML to UpdateHierarchy."""
-
-    onenote.call("update_hierarchy", xml=xml, schema=XML_SCHEMA_2013)
-    return ok(updated=True)

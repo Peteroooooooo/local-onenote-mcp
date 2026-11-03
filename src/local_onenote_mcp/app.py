@@ -22,8 +22,7 @@ Controls the local OneNote desktop app on this Windows machine.
 - Identifiers accept an object ID, an exact path such as "Notebook/Section/Page", or a unique name.
   IDs are fastest and never ambiguous; page titles are often duplicated, so prefer IDs for pages.
 - Read pages with get_page (format="markdown" keeps headings, lists, tables, to-dos and image OCR text).
-  To look at an image on a page, pass its callback_id to get_page_image. To see handwriting, drawings or
-  layout, call view_page, which shows the whole page as images.
+  view_page shows the page as it looks (handwriting, drawings, layout); with a callback_id it shows one image.
 - To change part of a page, call get_page(include_paragraphs=true) and then edit_page; this keeps
   everything else on the page (images, handwriting, attachments) untouched. Table cells are paragraphs too.
 - search_pages matches every word of the query, ranked; it can also filter by modification date.

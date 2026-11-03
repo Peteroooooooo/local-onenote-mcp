@@ -149,10 +149,6 @@ function Invoke-Operation([string]$op, $p) {
             $null = $onenote.MergeSections([string]$p.source_section_id, [string]$p.destination_section_id)
             return @{ merged = $true }
         }
-        "set_filing_location" {
-            $null = $onenote.SetFilingLocation([int]$p.filing_location, [int]$p.filing_location_type, [string]$p.section_or_page_id)
-            return @{ updated = $true }
-        }
         "render_pdf" {
             return Render-Pdf ([string]$p.path) ([int]$p.width) ([int]$p.max_pages)
         }

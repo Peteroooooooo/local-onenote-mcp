@@ -61,6 +61,22 @@ def test_replace_text_reports_missing_text():
         run(editor(), op="replace_text", find="nowhere")
 
 
+def test_replace_text_matches_across_font_runs():
+    # OneNote stores mixed Chinese/Latin text as separate font runs.
+    split = PAGE.replace(
+        "Due <span style='font-weight:bold'>2025</span> plan 2025",
+        "<span style='font-family:\"Microsoft YaHei\"'>每分钟</span><span lang=en-US> 60 </span>"
+        "<span style='font-family:\"Microsoft YaHei\"'>次。</span>a<br>b",
+    )
+    page = editor(split)
+
+    assert run(page, op="replace_text", find="60 次", replace="120 次")["replacements"] == 1
+    text = page.page.find(f".//{ONE}OE[@objectID='a']/{ONE}T").text
+    assert text == "<span style='font-family:\"Microsoft YaHei\"'>每分钟</span><span lang=en-US> 120 次</span><span style='font-family:\"Microsoft YaHei\"'>。</span>a<br>b"
+    with pytest.raises(ValueError, match="not found"):
+        run(page, op="replace_text", find="ab", replace="x")
+
+
 def test_set_text_keeps_bullet_and_children():
     page = editor()
     run(page, op="set_text", paragraph_id="b", content="**new** text")

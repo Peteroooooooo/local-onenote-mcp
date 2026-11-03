@@ -91,7 +91,7 @@ def resolve_item(items: Iterable[Item], identifier: str, item_type: str | None =
                 return live[0]
             paths = ", ".join(item["path"] for item in matches[:10])
             raise ValueError(f"Ambiguous {label} identifier '{identifier}'. Use an ID or exact path. Matches: {paths}")
-    raise ValueError(f"No {label} found for '{identifier}'. Use an ID or exact path from list_hierarchy, list_sections, or list_pages.")
+    raise ValueError(f"No {label} found for '{identifier}'. Use an ID or exact path from list_hierarchy.")
 
 
 def safe_leaf_name(name: str) -> str:

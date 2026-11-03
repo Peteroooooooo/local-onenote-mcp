@@ -6,23 +6,18 @@ from pathlib import Path
 from typing import Any
 
 from ..app import WRITES, ok, onenote, tool
-from ..constants import FILING_LOCATION_TYPES, FILING_LOCATIONS, PUBLISH_FORMATS, enum_value
+from ..constants import PUBLISH_FORMATS, enum_value
 
 
 @tool(WRITES)
-def navigate_to(object_identifier: str, page_content_object_id: str = "", new_window: bool = False) -> dict[str, Any]:
-    """Show a notebook, section, page or paragraph in the OneNote window."""
+def navigate_to(target: str, paragraph_id: str = "", new_window: bool = False) -> dict[str, Any]:
+    """Show a notebook, section, page or paragraph in the OneNote window. target is an identifier or a onenote: link."""
 
-    object_id = onenote.resolve(object_identifier)["id"]
-    onenote.call("navigate_to", object_id=object_id, page_content_object_id=page_content_object_id, new_window=new_window)
-    return ok(navigated=True)
-
-
-@tool(WRITES)
-def navigate_to_url(url: str, new_window: bool = False) -> dict[str, Any]:
-    """Open a onenote: link in the OneNote window."""
-
-    onenote.call("navigate_to_url", url=url, new_window=new_window)
+    if target.strip().casefold().startswith("onenote:"):
+        onenote.call("navigate_to_url", url=target.strip(), new_window=new_window)
+    else:
+        object_id = onenote.resolve(target)["id"]
+        onenote.call("navigate_to", object_id=object_id, page_content_object_id=paragraph_id, new_window=new_window)
     return ok(navigated=True)
 
 
@@ -55,17 +50,3 @@ def publish_object(object_identifier: str, target_path: str, format: str = "pdf"
     object_id = onenote.resolve(object_identifier)["id"]
     result = onenote.call("publish", object_id=object_id, target_path=str(output), format=enum_value("format", format, PUBLISH_FORMATS))
     return ok(path=result["path"])
-
-
-@tool(WRITES)
-def set_filing_location(filing_location: str, filing_location_type: str, section_or_page_identifier: str) -> dict[str, Any]:
-    """Choose where OneNote files emails, web clips, printouts and similar content."""
-
-    object_id = onenote.resolve(section_or_page_identifier)["id"]
-    onenote.call(
-        "set_filing_location",
-        filing_location=enum_value("filing_location", filing_location, FILING_LOCATIONS),
-        filing_location_type=enum_value("filing_location_type", filing_location_type, FILING_LOCATION_TYPES),
-        section_or_page_id=object_id,
-    )
-    return ok(object_id=object_id, updated=True)

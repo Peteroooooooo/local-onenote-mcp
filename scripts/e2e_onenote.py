@@ -92,10 +92,10 @@ async def main() -> int:
         async with ClientSession(read, write) as session:
             await session.initialize()
 
-            async def call(name: str, **args: Any) -> Any:
+            async def call(tool_name: str, /, **args: Any) -> Any:
                 started = time.perf_counter()
-                result = await session.call_tool(name, args)
-                timings[name] = round((time.perf_counter() - started) * 1000)
+                result = await session.call_tool(tool_name, args)
+                timings[tool_name] = round((time.perf_counter() - started) * 1000)
                 if result.isError:
                     return {"ok": False, "error": result.content[0].text if result.content else ""}
                 images = [block for block in result.content if block.type == "image"]
@@ -104,10 +104,10 @@ async def main() -> int:
                     return {"ok": True, "image": images[0], "images": images, "text": texts[0] if texts else ""}
                 return json.loads(result.content[0].text)
 
-            notebook = await call("create_notebook", name_or_path=str(root / "MCP E2E"))
+            notebook = await call("create_item", kind="notebook", name=str(root / "MCP E2E"))
             notebook_id = notebook["notebook_id"]
             try:
-                section = await call("create_section", parent_identifier=notebook_id, section_name="Scratch")
+                section = await call("create_item", kind="section", parent_identifier=notebook_id, name="Scratch")
                 section_id = section["section_id"]
 
                 first = await call("create_page", section_identifier=section_id, title="Same title", content=MARKDOWN, content_format="markdown")
@@ -124,7 +124,7 @@ async def main() -> int:
                 ), text)
 
                 before = await call("get_page", page_identifier=first["page_id"], include_xml=True)
-                await call("add_image_to_page", page_identifier=first["page_id"], image_path=str(image), width=96)
+                await call("append_to_page", page_identifier=first["page_id"], image_path=str(image), width=96)
                 after = await call("get_page", page_identifier=first["page_id"], include_objects=True, include_xml=True)
                 objects = after["objects"]
 
@@ -136,8 +136,8 @@ async def main() -> int:
                 text_bottom = content_bottom(before["xml"]) or 0
                 checks.add("new image is placed below existing text", image_y is not None and image_y >= text_bottom, {"image_y": image_y, "text_bottom": text_bottom})
                 callback = next((obj.get("callback_id") for obj in objects if obj["type"] == "Image" and obj.get("callback_id")), None)
-                shown = await call("get_page_image", page_identifier=first["page_id"], callback_id=callback or "")
-                checks.add("get_page_image returns an image", shown.get("ok") and "image" in shown, shown.get("error"))
+                shown = await call("view_page", page_identifier=first["page_id"], callback_id=callback or "")
+                checks.add("view_page(callback_id) returns the image", shown.get("ok") and "image" in shown, shown.get("error"))
 
                 found = await call("search_pages", query=TOKEN, start_identifier=notebook_id)
                 checks.add("search finds the new page", any(p["id"] == first["page_id"] for p in found.get("pages", [])), found.get("search_backend"))
@@ -164,13 +164,13 @@ async def main() -> int:
                 undone = (await call("get_page", page_identifier=second["page_id"])).get("text")
                 checks.add("restore_backup(replace) undoes replace_page_body", undo.get("ok") and undone == "second body", undo.get("error") or undone)
 
-                gone = await call("delete_hierarchy", object_identifier=second["page_id"], permanently=True)
-                remaining = [p["id"] for p in (await call("list_pages", section_identifier=section_id)).get("pages", [])]
+                gone = await call("delete_item", identifier=second["page_id"], permanently=True)
+                remaining = [p["id"] for p in (await call("list_hierarchy", start_identifier=section_id, item_type="page")).get("items", [])]
                 checks.add("deleting one duplicate keeps the other", first["page_id"] in remaining and second["page_id"] not in remaining)
                 back = await call("restore_backup", backup_id=(gone.get("backup_ids") or [0])[0])
                 back_text = (await call("get_page", page_identifier=back.get("page_id", ""))).get("text")
                 checks.add("a permanently deleted page can be restored from its backup", back.get("ok") and back_text == "second body", back.get("error") or back_text)
-                await call("delete_hierarchy", object_identifier=back.get("page_id", ""), permanently=True)
+                await call("delete_item", identifier=back.get("page_id", ""), permanently=True)
 
                 await move_checks(call, checks, root, notebook_id, section_id)
             finally:
@@ -236,7 +236,7 @@ async def edit_checks(call, checks: Checks, root: Path, section_id: str, page_id
 
     attachment = root / "notes.txt"
     attachment.write_text("attachment body ✓", encoding="utf-8")
-    attached = await call("add_file_to_page", page_identifier=page_id, file_path=str(attachment))
+    attached = await call("append_to_page", page_identifier=page_id, file_path=str(attachment))
     original = await read(page_id)
     copied = await call("copy_page", page_identifier=page_id)
     copy = await read(copied.get("page_id", ""))
@@ -258,21 +258,21 @@ async def edit_checks(call, checks: Checks, root: Path, section_id: str, page_id
 
 async def move_checks(call, checks: Checks, root: Path, notebook_id: str, section_id: str) -> None:
     async def page_order(section: str) -> list[tuple[str, str]]:
-        pages = (await call("list_pages", section_identifier=section)).get("pages", [])
+        pages = (await call("list_hierarchy", start_identifier=section, item_type="page")).get("items", [])
         return [(p["name"], p.get("pageLevel", "1")) for p in pages]
 
     parent = await call("create_page", section_identifier=section_id, title="Parent page", content="parent body")
     child = await call("create_page", section_identifier=section_id, title="Child page", content="child body")
     await call("create_page", section_identifier=section_id, title="Other page")
-    indented = await call("set_page_level", page_identifier=child["page_id"], level=2)
-    checks.add("set_page_level makes a subpage", indented.get("ok"), indented.get("error"))
+    indented = await call("move_page", page_identifier=child["page_id"], level=2)
+    checks.add("move_page(level=2) makes a subpage", indented.get("ok"), indented.get("error"))
 
     reordered = await call("move_page", page_identifier="MCP E2E/Scratch/Other page", to_top=True)
     order = await page_order(section_id)
     checks.add("move_page reorders inside a section", reordered.get("ok") and order[0][0] == "Other page", order)
 
-    target_nb = (await call("create_notebook", name_or_path=str(root / "MCP E2E Target")))["notebook_id"]
-    dest = (await call("create_section", parent_identifier=target_nb, section_name="Dest"))["section_id"]
+    target_nb = (await call("create_item", kind="notebook", name=str(root / "MCP E2E Target")))["notebook_id"]
+    dest = (await call("create_item", kind="section", parent_identifier=target_nb, name="Dest"))["section_id"]
     moved = await call("move_page", page_identifier=parent["page_id"], destination_section_identifier=dest)
     dest_order = await page_order(dest)
     body = await call("get_page", page_identifier=moved.get("page_id", ""))
@@ -283,32 +283,32 @@ async def move_checks(call, checks: Checks, root: Path, notebook_id: str, sectio
     )
     checks.add("moved pages are gone from the source", all(name not in {"Parent page", "Child page"} for name, _ in await page_order(section_id)))
 
-    await call("create_section", parent_identifier=notebook_id, section_name="Movable")
-    await call("create_section_group", parent_identifier=notebook_id, group_name="Group")
+    await call("create_item", kind="section", parent_identifier=notebook_id, name="Movable")
+    await call("create_item", kind="section_group", parent_identifier=notebook_id, name="Group")
     into_group = await call("move_section", section_identifier="MCP E2E/Movable", destination_identifier="MCP E2E/Group")
     checks.add("move_section moves a section into a section group", into_group.get("ok") and into_group["item"]["path"] == "MCP E2E/Group/Movable", into_group.get("error"))
 
     across = await call("move_section", section_identifier="MCP E2E/Group/Movable", destination_identifier=target_nb)
     checks.add("move_section moves a section to another notebook", across.get("ok") and across["item"]["path"] == "MCP E2E Target/Movable", across.get("error") or across.get("warning"))
 
-    renamed = await call("rename_section", section_identifier="MCP E2E Target/Movable", new_name="Renamed")
-    checks.add("rename_section renames", renamed.get("ok") and renamed["item"]["path"] == "MCP E2E Target/Renamed", renamed.get("error"))
+    renamed = await call("rename_item", identifier="MCP E2E Target/Movable", new_name="Renamed")
+    checks.add("rename_item renames a section", renamed.get("ok") and renamed["item"]["path"] == "MCP E2E Target/Renamed", renamed.get("error"))
 
     await call("close_notebook", notebook_identifier=notebook_id)
     await call("close_notebook", notebook_identifier=target_nb)
     reopened = [
-        await call("open_hierarchy", path=str(root / "MCP E2E"), create_type="notebook"),
-        await call("open_hierarchy", path=str(root / "MCP E2E Target"), create_type="notebook"),
+        await call("open_notebook", path=str(root / "MCP E2E")),
+        await call("open_notebook", path=str(root / "MCP E2E Target")),
     ]
     time.sleep(2)
-    all_sections = await call("list_sections")
-    sections = sorted(s["path"] for s in all_sections.get("sections", []) if s["path"].startswith("MCP E2E"))
+    all_sections = await call("list_hierarchy", item_type="section")
+    sections = sorted(s["path"] for s in all_sections.get("items", []) if s["path"].startswith("MCP E2E"))
     expected = ["MCP E2E Target/Dest", "MCP E2E Target/Renamed", "MCP E2E/Scratch"]
     checks.add(
         "moves and renames survive closing and reopening the notebooks",
         sections == expected,
         {"sections": sections, "reopen": [r.get("error") or r.get("object_id") for r in reopened], "list_error": all_sections.get("error"),
-         "notebooks": [n["path"] for n in (await call("list_notebooks")).get("notebooks", [])]},
+         "notebooks": [n["path"] for n in (await call("list_hierarchy", item_type="notebook")).get("items", [])]},
     )
     dest_after = await page_order("MCP E2E Target/Dest")
     checks.add("moved pages survive reopening", dest_after == [("Parent page", "1"), ("Child page", "2")], dest_after)
