@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import base64
+import copy
 from pathlib import Path
 from typing import Any
 
 from ..app import DESTRUCTIVE, READ_ONLY, WRITES, backups, ok, onenote, tool
-from ..constants import CREATE_FILE_TYPES, NEW_PAGE_STYLES, SPECIAL_LOCATIONS, enum_value
+from ..constants import CREATE_FILE_TYPES, NEW_PAGE_STYLES, ONE, SPECIAL_LOCATIONS, enum_value
 from ..editing import EditOperation, PageEditor
 from ..hierarchy import ONENOTE_ID, child_path, in_recycle_bin, parse_xml, safe_leaf_name
 from ..image_utils import proportional_dimensions
-from ..pages import below_existing, replace_contents, snapshot, write_copy
+from ..pages import below_existing, replace_contents, restore_blocks, snapshot, snapshot_blocks, write_copy
 from ..pagexml import (
     body_object_ids,
     build_file_page_update_xml,
@@ -20,7 +21,7 @@ from ..pagexml import (
     collect_page_objects,
 )
 
-RESTORE_MODES = {"new_page", "replace"}
+RESTORE_MODES = {"auto", "new_page", "replace"}
 
 
 @tool(WRITES)
@@ -181,17 +182,20 @@ def edit_page(page_identifier: str, operations: list[EditOperation]) -> dict[str
     [{"op": "replace_text", "find": "2025", "replace": "2026"},
      {"op": "insert_after", "paragraph_id": "...", "content": "- new item"},
      {"op": "set_todo", "paragraph_id": "...", "done": true}].
-    A backup is saved first. Returns the page's paragraphs after the edit.
+    A backup of the changed blocks is saved first. Returns the page's paragraphs after the edit.
     """
 
     if not operations:
         raise ValueError("operations is empty.")
     ops = [EditOperation.model_validate(op) if isinstance(op, dict) else op for op in operations]
     page_id = onenote.resolve(page_identifier, "page")["id"]
-    editor = PageEditor(parse_xml(onenote.page_xml(page_id)))
+    page = parse_xml(onenote.page_xml(page_id))
+    original = copy.deepcopy(page)
+    editor = PageEditor(page)
     results = [editor.apply(op) for op in ops]
     update, emptied = editor.build_update(page_id), editor.empty_outlines()
-    backup_id = snapshot(page_id, "edit_page")
+    touched = {outline.attrib["objectID"] for outline in editor.touched if outline.attrib.get("objectID")}
+    backup_id = snapshot_blocks(page_id, original, touched, "edit_page")
     if update:
         onenote.update_page(update)
     for object_id in emptied:
@@ -271,25 +275,38 @@ def list_backups(page_identifier: str = "", limit: int = 20) -> dict[str, Any]:
 
 
 @tool(WRITES)
-def restore_backup(backup_id: int, mode: str = "new_page", section_identifier: str = "") -> dict[str, Any]:
-    """Bring back a page from list_backups.
+def restore_backup(backup_id: int, mode: str = "auto", section_identifier: str = "") -> dict[str, Any]:
+    """Bring back a page, or the blocks an edit_page changed, from list_backups.
 
-    mode="new_page" (default) writes the saved version as a new page in section_identifier, or in the page's
-    original section. mode="replace" puts the saved version back into the original page; its current state is
-    backed up first, so a restore can itself be undone.
+    mode="replace" puts the saved version back into the original page; its current state is backed up first,
+    so a restore can itself be undone. mode="new_page" writes a saved whole page as a new page in
+    section_identifier, or in the page's original section (this also works after the page was deleted).
+    mode="auto" (default): "replace" for backups of kind "blocks", "new_page" for whole pages.
     """
 
     mode = mode.strip().casefold()
     if mode not in RESTORE_MODES:
-        raise ValueError("mode must be 'new_page' or 'replace'.")
+        raise ValueError("mode must be 'auto', 'new_page' or 'replace'.")
     meta, page, files = backups.load(backup_id)
+    blocks = meta["kind"] == "blocks"
+    if mode == "auto":
+        mode = "replace" if blocks else "new_page"
     if mode == "replace":
         target = onenote.lookup(meta["page_id"])
         if target is None or in_recycle_bin(target):
-            raise ValueError("The original page no longer exists; use mode='new_page'.")
-        before = snapshot(meta["page_id"], f"before restore_backup {backup_id}")
-        replace_contents(meta["page_id"], page, files)
+            hint = " A blocks backup cannot be restored without its page." if blocks else " Use mode='new_page'."
+            raise ValueError("The original page no longer exists." + hint)
+        if blocks:
+            current = parse_xml(onenote.page_xml(meta["page_id"]))
+            ids = {node.attrib.get("objectID") for node in page.findall(ONE + "Outline")} - {None}
+            before = snapshot_blocks(meta["page_id"], current, ids, f"before restore_backup {backup_id}")
+            restore_blocks(meta["page_id"], page)
+        else:
+            before = snapshot(meta["page_id"], f"before restore_backup {backup_id}")
+            replace_contents(meta["page_id"], page, files)
         return ok(page_id=meta["page_id"], restored_from=backup_id, backup_id=before)
+    if blocks:
+        raise ValueError("This backup holds only the blocks an edit changed; restore it with mode='replace'.")
     if section_identifier:
         section_id = onenote.resolve(section_identifier, "section")["id"]
     else:

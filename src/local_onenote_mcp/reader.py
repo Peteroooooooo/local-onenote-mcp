@@ -12,7 +12,7 @@ from .constants import ONE_NS
 
 ReadFormat = Literal["text", "markdown"]
 _NS = f"{{{ONE_NS}}}"
-INK_LABEL = "[Handwriting: no recognised text; export the page with publish_object to see it]"
+INK_LABEL = "[Handwriting: no recognised text; use view_page to see it]"
 
 
 def _local(tag: str) -> str:

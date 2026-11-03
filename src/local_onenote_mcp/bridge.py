@@ -153,10 +153,57 @@ function Invoke-Operation([string]$op, $p) {
             $null = $onenote.SetFilingLocation([int]$p.filing_location, [int]$p.filing_location_type, [string]$p.section_or_page_id)
             return @{ updated = $true }
         }
+        "render_pdf" {
+            return Render-Pdf ([string]$p.path) ([int]$p.width) ([int]$p.max_pages)
+        }
         default {
             throw "Unsupported OneNote bridge operation: $op"
         }
     }
+}
+
+# Windows.Data.Pdf (WinRT) turns a published PDF into JPEG images, one per printed page.
+function Initialize-WinRT {
+    if ($null -ne $script:asTask) { return }
+    Add-Type -AssemblyName System.Runtime.WindowsRuntime
+    $null = [Windows.Data.Pdf.PdfDocument, Windows.Data.Pdf, ContentType = WindowsRuntime]
+    $null = [Windows.Graphics.Imaging.BitmapEncoder, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
+    $null = [Windows.Storage.Streams.InMemoryRandomAccessStream, Windows.Storage.Streams, ContentType = WindowsRuntime]
+    $methods = [System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq "AsTask" -and $_.GetParameters().Count -eq 1 }
+    $script:asAction = $methods | Where-Object { $_.GetParameters()[0].ParameterType.Name -eq "IAsyncAction" } | Select-Object -First 1
+    $script:asTask = $methods | Where-Object { $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' } | Select-Object -First 1
+}
+
+function Wait-WinRT($operation, [Type]$resultType) {
+    if ($null -eq $resultType) {
+        $script:asAction.Invoke($null, @($operation)).Wait()
+        return
+    }
+    $task = $script:asTask.MakeGenericMethod($resultType).Invoke($null, @($operation))
+    $task.Wait()
+    return $task.Result
+}
+
+function Render-Pdf([string]$path, [int]$width, [int]$maxPages) {
+    Initialize-WinRT
+    $bytes = [IO.File]::ReadAllBytes($path)
+    $source = [System.IO.WindowsRuntimeStreamExtensions]::AsRandomAccessStream((New-Object IO.MemoryStream(, $bytes)))
+    $document = Wait-WinRT ([Windows.Data.Pdf.PdfDocument]::LoadFromStreamAsync($source)) ([Windows.Data.Pdf.PdfDocument])
+    $images = @()
+    for ($i = 0; $i -lt [Math]::Min([int]$document.PageCount, $maxPages); $i++) {
+        $page = $document.GetPage($i)
+        $options = New-Object Windows.Data.Pdf.PdfPageRenderOptions
+        $options.DestinationWidth = $width
+        $options.BitmapEncoderId = [Windows.Graphics.Imaging.BitmapEncoder]::JpegEncoderId
+        $output = New-Object Windows.Storage.Streams.InMemoryRandomAccessStream
+        Wait-WinRT ($page.RenderToStreamAsync($output, $options)) $null
+        $memory = New-Object IO.MemoryStream
+        [System.IO.WindowsRuntimeStreamExtensions]::AsStreamForRead($output.GetInputStreamAt(0)).CopyTo($memory)
+        $images += [Convert]::ToBase64String($memory.ToArray())
+        $page.Dispose()
+        $output.Dispose()
+    }
+    return @{ pages = [int]$document.PageCount; images = $images }
 }
 
 while ($true) {

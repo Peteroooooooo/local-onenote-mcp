@@ -8,6 +8,7 @@ with the page's style and tag definitions, so everything else on the page
 
 from __future__ import annotations
 
+import copy
 import html
 import re
 import xml.etree.ElementTree as ET
@@ -27,21 +28,24 @@ TODO_NAMES = {"to do", "待办事项", "待办"}
 class EditOperation(BaseModel):
     """One change to a page. Paragraph IDs come from get_page(include_paragraphs=true)."""
 
-    op: Literal["replace_text", "set_text", "insert_after", "insert_before", "delete", "set_todo"] = Field(
+    op: Literal["replace_text", "set_text", "insert_after", "insert_before", "delete", "set_todo", "add_row", "delete_row"] = Field(
         description=(
             "replace_text: find/replace across the page body, formatting kept. "
             "set_text: replace one paragraph's text, keeping its bullet, number, to-do box and style. "
             "insert_after / insert_before: add content (any length, any format) next to a paragraph. "
             "delete: remove a paragraph and its indented children. "
-            "set_todo: tick or untick a paragraph's to-do box, adding one if it has none."
+            "set_todo: tick or untick a paragraph's to-do box, adding one if it has none. "
+            "add_row: add a table row after the row holding paragraph_id (or at the end, given the table's own paragraph). "
+            "delete_row: remove the table row holding paragraph_id."
         )
     )
-    paragraph_id: str = Field("", description="Target paragraph for every op except replace_text.")
+    paragraph_id: str = Field("", description="Target paragraph for every op except replace_text. Table cells have their own paragraphs.")
     find: str = Field("", description="replace_text: exact text to find (case-sensitive).")
     replace: str = Field("", description="replace_text: replacement text.")
     max_count: int = Field(0, description="replace_text: replace at most this many matches; 0 = all.")
     content: str = Field("", description="set_text / insert_*: the new content.")
-    content_format: Literal["plain", "html", "markdown"] = Field("markdown", description="Format of content.")
+    cells: list[str] = Field(default_factory=list, description="add_row: text of each cell, left to right; missing cells stay empty.")
+    content_format: Literal["plain", "html", "markdown"] = Field("markdown", description="Format of content and cells.")
     done: bool = Field(True, description="set_todo: true = ticked.")
 
 
@@ -50,6 +54,8 @@ class _Located:
     oe: ET.Element
     parent: ET.Element
     outline: ET.Element
+    table: ET.Element | None = None
+    row: ET.Element | None = None
 
 
 def is_todo_def(node: ET.Element) -> bool:
@@ -67,33 +73,40 @@ class PageEditor:
         for outline in page.findall(ONE + "Outline"):
             self._walk(outline.find(ONE + "OEChildren"), outline)
 
-    def _walk(self, container: ET.Element | None, outline: ET.Element) -> None:
+    def _walk(self, container: ET.Element | None, outline: ET.Element, table: ET.Element | None = None, row: ET.Element | None = None) -> None:
         if container is None:
             return
         for oe in container.findall(ONE + "OE"):
             if oe.attrib.get("objectID"):
-                self._index[oe.attrib["objectID"]] = _Located(oe, container, outline)
-            self._walk(oe.find(ONE + "OEChildren"), outline)
+                self._index[oe.attrib["objectID"]] = _Located(oe, container, outline, table, row)
+            self._walk(oe.find(ONE + "OEChildren"), outline, table, row)
+            inner = oe.find(ONE + "Table")
+            if inner is not None:
+                for inner_row in inner.findall(ONE + "Row"):
+                    for cell in inner_row.findall(ONE + "Cell"):
+                        self._walk(cell.find(ONE + "OEChildren"), outline, inner, inner_row)
 
     # -- reading ---------------------------------------------------------
 
     def paragraphs(self) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         for outline in self.page.findall(ONE + "Outline"):
-            self._describe(outline.find(ONE + "OEChildren"), 0, result)
+            self._describe(outline.find(ONE + "OEChildren"), 0, result, {})
         return result
 
-    def _describe(self, container: ET.Element | None, depth: int, out: list[dict[str, Any]]) -> None:
+    def _describe(self, container: ET.Element | None, depth: int, out: list[dict[str, Any]], cell: dict[str, Any]) -> None:
         if container is None:
             return
         for oe in container.findall(ONE + "OE"):
-            record: dict[str, Any] = {"id": oe.attrib.get("objectID", ""), "depth": depth}
+            record: dict[str, Any] = {"id": oe.attrib.get("objectID", ""), "depth": depth, **cell}
             text_node = oe.find(ONE + "T")
+            table = oe.find(ONE + "Table")
             if text_node is not None:
                 record["text"] = inline_text(text_node.text).replace("\xa0", " ")
-            elif oe.find(ONE + "Table") is not None:
-                rows = oe.find(ONE + "Table").findall(ONE + "Row")
-                record["kind"] = f"table ({len(rows)} rows)"
+            elif table is not None:
+                rows = table.findall(ONE + "Row")
+                columns = max((len(row.findall(ONE + "Cell")) for row in rows), default=0)
+                record["kind"] = f"table ({len(rows)} rows x {columns} columns)"
             else:
                 kinds = [child.tag.removeprefix(ONE) for child in oe if child.tag.removeprefix(ONE) in {"Image", "InkDrawing", "InkWord", "InsertedFile", "MediaFile"}]
                 record["kind"] = kinds[0].lower() if kinds else "empty"
@@ -107,7 +120,12 @@ class PageEditor:
             if todo is not None:
                 record["todo"] = todo.attrib.get("completed") == "true"
             out.append(record)
-            self._describe(oe.find(ONE + "OEChildren"), depth + 1, out)
+            self._describe(oe.find(ONE + "OEChildren"), depth + 1, out, cell)
+            if table is not None:
+                for r, row in enumerate(table.findall(ONE + "Row")):
+                    for c, cell_node in enumerate(row.findall(ONE + "Cell")):
+                        where = {"table": record["id"], "row": r, "column": c}
+                        self._describe(cell_node.find(ONE + "OEChildren"), depth + 1, out, where)
 
     def _todo(self, oe: ET.Element) -> ET.Element | None:
         for tag in oe.findall(ONE + "Tag"):
@@ -139,11 +157,18 @@ class PageEditor:
             self.delete(located)
         elif op.op == "set_todo":
             self.set_todo(located, op.done)
+        elif op.op == "add_row":
+            self.add_row(located, op.cells, op.content_format)
+        elif op.op == "delete_row":
+            self.delete_row(located)
         return {"op": op.op, "paragraph_id": op.paragraph_id}
 
     def _locate(self, paragraph_id: str) -> _Located:
         located = self._index.get(paragraph_id)
-        if located is None or located.oe not in list(located.parent):
+        attached = located is not None and located.oe in list(located.parent)
+        if attached and located.row is not None:
+            attached = located.row in list(located.table)
+        if not attached:
             raise ValueError(f"Paragraph '{paragraph_id}' is not on this page (deleted earlier in this edit, or a wrong ID).")
         return located
 
@@ -184,7 +209,46 @@ class PageEditor:
         return len(new_nodes)
 
     def delete(self, located: _Located) -> None:
-        located.parent.remove(located.oe)
+        if located.table is not None and len(located.parent.findall(ONE + "OE")) == 1:
+            # A table cell must keep one paragraph; empty it instead.
+            for child in list(located.oe):
+                located.oe.remove(child)
+            ET.SubElement(located.oe, ONE + "T").text = ""
+        else:
+            located.parent.remove(located.oe)
+        self._touch(located.outline)
+
+    def add_row(self, located: _Located, cells: list[str], fmt: str) -> None:
+        table, anchor = located.table, located.row
+        if table is None:
+            table, anchor = located.oe.find(ONE + "Table"), None
+        if table is None:
+            raise ValueError("add_row needs a paragraph inside a table, or the table's own paragraph.")
+        rows = table.findall(ONE + "Row")
+        row = copy.deepcopy(rows[-1])
+        row_cells = row.findall(ONE + "Cell")
+        if len(cells) > len(row_cells):
+            raise ValueError(f"The table has {len(row_cells)} columns but {len(cells)} cells were given.")
+        for node in row.iter():
+            node.attrib.pop("objectID", None)
+        for index, cell in enumerate(row_cells):
+            container = cell.find(ONE + "OEChildren")
+            first = container.find(ONE + "OE")
+            for extra in container.findall(ONE + "OE")[1:]:
+                container.remove(extra)
+            for child in list(first):
+                first.remove(child)
+            ET.SubElement(first, ONE + "T").text = _inline(cells[index], fmt) if index < len(cells) else ""
+        children = list(table)
+        table.insert(children.index(anchor if anchor is not None else rows[-1]) + 1, row)
+        self._touch(located.outline)
+
+    def delete_row(self, located: _Located) -> None:
+        if located.table is None or located.row is None:
+            raise ValueError("delete_row needs a paragraph inside a table cell.")
+        if len(located.table.findall(ONE + "Row")) == 1:
+            raise ValueError("This is the table's only row; delete the table's own paragraph instead.")
+        located.table.remove(located.row)
         self._touch(located.outline)
 
     def set_todo(self, located: _Located, done: bool) -> None:

@@ -119,3 +119,61 @@ def test_set_text_refuses_non_text_paragraphs():
     xml = PAGE.replace("<one:T><![CDATA[alone]]></one:T>", "<one:Image/>")
     with pytest.raises(ValueError, match="not text"):
         run(editor(xml), op="set_text", paragraph_id="d", content="x")
+
+
+TABLE_PAGE = f"""<one:Page xmlns:one="{NS}" ID="P">
+<one:QuickStyleDef index="0" name="p"/>
+<one:Outline objectID="o1"><one:OEChildren><one:OE objectID="tbl"><one:Table>
+  <one:Columns><one:Column index="0" width="60"/><one:Column index="1" width="60"/></one:Columns>
+  <one:Row objectID="r0"><one:Cell objectID="c00" shadingColor="#DEEAF6"><one:OEChildren><one:OE objectID="h1"><one:T><![CDATA[Name]]></one:T></one:OE></one:OEChildren></one:Cell>
+    <one:Cell objectID="c01"><one:OEChildren><one:OE objectID="h2"><one:T><![CDATA[State]]></one:T></one:OE></one:OEChildren></one:Cell></one:Row>
+  <one:Row objectID="r1"><one:Cell objectID="c10"><one:OEChildren><one:OE objectID="x1"><one:T><![CDATA[Alpha]]></one:T></one:OE></one:OEChildren></one:Cell>
+    <one:Cell objectID="c11"><one:OEChildren><one:OE objectID="x2"><one:T><![CDATA[Open]]></one:T></one:OE><one:OE objectID="x3"><one:T><![CDATA[note]]></one:T></one:OE></one:OEChildren></one:Cell></one:Row>
+</one:Table></one:OE></one:OEChildren></one:Outline>
+</one:Page>"""
+
+
+def rows(page: PageEditor) -> list[list[str]]:
+    table = page.page.find(f".//{ONE}Table")
+    return [[" / ".join(t.text for t in cell.iter(ONE + "T")) for cell in row.findall(ONE + "Cell")] for row in table.findall(ONE + "Row")]
+
+
+def test_table_cells_are_paragraphs_with_their_position():
+    paragraphs = editor(TABLE_PAGE).paragraphs()
+
+    assert paragraphs[0] == {"id": "tbl", "depth": 0, "kind": "table (2 rows x 2 columns)"}
+    assert {p["id"]: (p["row"], p["column"]) for p in paragraphs[1:]} == {"h1": (0, 0), "h2": (0, 1), "x1": (1, 0), "x2": (1, 1), "x3": (1, 1)}
+    assert all(p["table"] == "tbl" for p in paragraphs[1:])
+
+
+def test_set_text_in_a_cell_and_add_rows():
+    page = editor(TABLE_PAGE)
+    run(page, op="set_text", paragraph_id="x2", content="Done")
+    run(page, op="add_row", paragraph_id="h1", cells=["Beta", "**New**"])
+    run(page, op="add_row", paragraph_id="tbl", cells=["Gamma"])
+
+    assert rows(page) == [["Name", "State"], ["Beta", "<strong>New</strong>"], ["Alpha", "Done / note"], ["Gamma", ""]]
+    added = page.page.find(f".//{ONE}Table").findall(ONE + "Row")[1]
+    assert not any("objectID" in node.attrib for node in added.iter())
+    assert ET.fromstring(page.build_update("P")).find(ONE + "Outline").attrib["objectID"] == "o1"
+
+
+def test_add_row_refuses_too_many_cells_and_non_table_paragraphs():
+    with pytest.raises(ValueError, match="2 columns"):
+        run(editor(TABLE_PAGE), op="add_row", paragraph_id="x1", cells=["a", "b", "c"])
+    with pytest.raises(ValueError, match="inside a table"):
+        run(editor(), op="add_row", paragraph_id="a", cells=["a"])
+
+
+def test_delete_row_and_cell_paragraphs():
+    page = editor(TABLE_PAGE)
+    run(page, op="delete", paragraph_id="x3")
+    run(page, op="delete", paragraph_id="x1")
+    assert rows(page) == [["Name", "State"], ["", "Open"]]
+
+    run(page, op="delete_row", paragraph_id="x2")
+    assert rows(page) == [["Name", "State"]]
+    with pytest.raises(ValueError, match="not on this page"):
+        run(page, op="set_text", paragraph_id="x2", content="x")
+    with pytest.raises(ValueError, match="only row"):
+        run(page, op="delete_row", paragraph_id="h1")

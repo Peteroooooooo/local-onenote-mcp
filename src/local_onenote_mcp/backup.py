@@ -5,7 +5,8 @@ Storage layout (one SQLite file):
   Every snapshot of a page that still shows the same picture points at the
   same blob, so repeated edits cost only the page's compressed text XML.
 - snapshots: the page XML with binary payloads swapped for blob references,
-  zlib-compressed, plus where the page lived and why it was saved.
+  zlib-compressed, plus where the page lived and why it was saved. A "blocks"
+  snapshot holds only the text blocks a partial edit changed (a few KB).
 
 Limits: at most `versions` snapshots per page, none older than `days`, and the
 whole file under `max_bytes` (oldest snapshots go first). A page whose content
@@ -36,7 +37,7 @@ create table if not exists blobs (hash text primary key, data blob not null, siz
 create table if not exists snapshots (
     id integer primary key autoincrement,
     page_id text not null, section_id text, path text, title text,
-    reason text, created real not null, digest text not null,
+    reason text, created real not null, digest text not null, kind text not null,
     xml blob not null, size integer not null
 );
 create table if not exists links (snapshot_id integer not null, hash text not null, primary key (snapshot_id, hash));
@@ -78,9 +79,13 @@ class BackupStore:
         path: str = "",
         title: str = "",
         reason: str,
+        kind: str = "page",
         read_file: Callable[[ET.Element], bytes | None] | None = None,
     ) -> int | None:
-        """Store a page (XML fetched with page_info=all). Returns the snapshot ID; an unchanged page reuses the last one."""
+        """Store a page (XML fetched with page_info=all). Returns the snapshot ID; an unchanged page reuses the last one.
+
+        kind="blocks" marks a partial snapshot: only some outlines of the page, restored in place.
+        """
 
         if not self.enabled:
             return None
@@ -116,9 +121,9 @@ class BackupStore:
             for blob_hash, raw in blobs.items():
                 db.execute("insert or ignore into blobs (hash, data, size) values (?, ?, ?)", (blob_hash, raw, len(raw)))
             cursor = db.execute(
-                "insert into snapshots (page_id, section_id, path, title, reason, created, digest, xml, size) "
-                "values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (page_id, section_id, path, title, reason, time.time(), digest, packed, len(packed)),
+                "insert into snapshots (page_id, section_id, path, title, reason, created, digest, kind, xml, size) "
+                "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (page_id, section_id, path, title, reason, time.time(), digest, kind, packed, len(packed)),
             )
             snapshot_id = int(cursor.lastrowid)
             db.executemany("insert or ignore into links (snapshot_id, hash) values (?, ?)", [(snapshot_id, h) for h in blobs])
@@ -160,7 +165,7 @@ class BackupStore:
     def list(self, page_id: str = "", limit: int = 20) -> list[dict[str, Any]]:
         if not self.enabled or (self.path is not None and not self.path.exists()):
             return []
-        query = "select id, page_id, section_id, path, title, reason, created, size from snapshots"
+        query = "select id, page_id, section_id, path, title, reason, kind, created, size from snapshots"
         params: tuple[Any, ...] = ()
         if page_id:
             query += " where page_id = ?"
@@ -168,7 +173,7 @@ class BackupStore:
         query += " order by id desc limit ?"
         with self._lock:
             rows = self._conn().execute(query, params + (max(1, limit),)).fetchall()
-        keys = ("backup_id", "page_id", "section_id", "path", "title", "reason", "created", "bytes")
+        keys = ("backup_id", "page_id", "section_id", "path", "title", "reason", "kind", "created", "bytes")
         result = []
         for row in rows:
             record = dict(zip(keys, row))
@@ -182,14 +187,14 @@ class BackupStore:
         with self._lock:
             db = self._conn()
             row = db.execute(
-                "select page_id, section_id, path, title, xml from snapshots where id = ?", (snapshot_id,)
+                "select page_id, section_id, path, title, kind, xml from snapshots where id = ?", (snapshot_id,)
             ).fetchone()
             if row is None:
                 raise ValueError(f"No backup with ID {snapshot_id}. Use list_backups to see what is kept.")
             blobs = dict(db.execute(
                 "select b.hash, b.data from blobs b join links l on l.hash = b.hash where l.snapshot_id = ?", (snapshot_id,)
             ).fetchall())
-        root = ET.fromstring(zlib.decompress(row[4]))
+        root = ET.fromstring(zlib.decompress(row[5]))
         files: dict[str, bytes] = {}
         for node in root.iter():
             digest = node.attrib.pop(BLOB_ATTR, None)
@@ -200,7 +205,7 @@ class BackupStore:
             else:
                 node.set(BLOB_ATTR, digest)
                 files[digest] = blobs[digest]
-        meta = {"page_id": row[0], "section_id": row[1], "path": row[2], "title": row[3]}
+        meta = {"page_id": row[0], "section_id": row[1], "path": row[2], "title": row[3], "kind": row[4]}
         return meta, root, files
 
     def stats(self) -> dict[str, Any]:

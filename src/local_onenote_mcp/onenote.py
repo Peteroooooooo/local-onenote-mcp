@@ -23,6 +23,20 @@ WRITE_OPERATIONS = {
     "update_page_content",
 }
 CONTAINER_TYPES = {"notebook", "section_group", "section"}
+# OneNote sometimes answers REGDB_E_CLASSNOTREG for a moment while it rewrites notebook files.
+# These calls are safe to send twice: reads, and hierarchy updates that describe the wanted end state.
+CLASS_NOT_REGISTERED = -2147221164
+RETRYABLE_OPERATIONS = {
+    "get_binary_page_content",
+    "get_hierarchy",
+    "get_hyperlink",
+    "get_page_content",
+    "get_special_location",
+    "get_web_hyperlink",
+    "find_pages",
+    "sync_hierarchy",
+    "update_hierarchy",
+}
 
 
 class OneNote:
@@ -37,7 +51,13 @@ class OneNote:
 
     def call(self, operation: str, **params: Any) -> dict[str, Any]:
         try:
-            return self.bridge.call(operation, **params)
+            try:
+                return self.bridge.call(operation, **params)
+            except OneNoteBridgeError as exc:
+                if exc.hresult != CLASS_NOT_REGISTERED or operation not in RETRYABLE_OPERATIONS:
+                    raise
+                time.sleep(0.5)
+                return self.bridge.call(operation, **params)
         except OneNoteBridgeError as exc:
             raise RuntimeError(str(exc)) from exc
         finally:

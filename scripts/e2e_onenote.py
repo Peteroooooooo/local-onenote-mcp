@@ -98,8 +98,10 @@ async def main() -> int:
                 timings[name] = round((time.perf_counter() - started) * 1000)
                 if result.isError:
                     return {"ok": False, "error": result.content[0].text if result.content else ""}
-                if result.content and result.content[0].type == "image":
-                    return {"ok": True, "image": result.content[0]}
+                images = [block for block in result.content if block.type == "image"]
+                if images:
+                    texts = [block.text for block in result.content if block.type == "text"]
+                    return {"ok": True, "image": images[0], "images": images, "text": texts[0] if texts else ""}
                 return json.loads(result.content[0].text)
 
             notebook = await call("create_notebook", name_or_path=str(root / "MCP E2E"))
@@ -146,19 +148,28 @@ async def main() -> int:
                 pdf = root / "weekly-plan.pdf"
                 exported = await call("publish_object", object_identifier=first["page_id"], target_path=str(pdf), format="pdf", overwrite=True)
                 checks.add("publish_object writes a PDF", exported.get("ok") and pdf.exists() and pdf.stat().st_size > 1000, str(pdf))
+                viewed = await call("view_page", page_identifier=first["page_id"])
+                checks.add(
+                    "view_page shows the page as images",
+                    viewed.get("ok") and viewed.get("images") and viewed["images"][0].mimeType == "image/jpeg" and viewed["text"].startswith("Printed"),
+                    viewed.get("error") or viewed.get("text"),
+                )
 
                 await edit_checks(call, checks, root, section_id, first["page_id"])
 
-                await call("replace_page_body", page_identifier=second["page_id"], content="replaced body")
+                swapped = await call("replace_page_body", page_identifier=second["page_id"], content="replaced body")
                 replaced = await call("get_page", page_identifier=second["page_id"])
                 checks.add("replace_page_body swaps the body", replaced.get("text") == "replaced body", replaced.get("text"))
+                undo = await call("restore_backup", backup_id=swapped.get("backup_id") or 0, mode="replace")
+                undone = (await call("get_page", page_identifier=second["page_id"])).get("text")
+                checks.add("restore_backup(replace) undoes replace_page_body", undo.get("ok") and undone == "second body", undo.get("error") or undone)
 
                 gone = await call("delete_hierarchy", object_identifier=second["page_id"], permanently=True)
                 remaining = [p["id"] for p in (await call("list_pages", section_identifier=section_id)).get("pages", [])]
                 checks.add("deleting one duplicate keeps the other", first["page_id"] in remaining and second["page_id"] not in remaining)
                 back = await call("restore_backup", backup_id=(gone.get("backup_ids") or [0])[0])
                 back_text = (await call("get_page", page_identifier=back.get("page_id", ""))).get("text")
-                checks.add("a permanently deleted page can be restored from its backup", back.get("ok") and back_text == "replaced body", back.get("error") or back_text)
+                checks.add("a permanently deleted page can be restored from its backup", back.get("ok") and back_text == "second body", back.get("error") or back_text)
                 await call("delete_hierarchy", object_identifier=back.get("page_id", ""), permanently=True)
 
                 await move_checks(call, checks, root, notebook_id, section_id)
@@ -190,6 +201,9 @@ async def edit_checks(call, checks: Checks, root: Path, section_id: str, page_id
             {"op": "insert_after", "paragraph_id": ids["first bullet"], "content": "- inserted bullet"},
             {"op": "set_todo", "paragraph_id": ids["open task"], "done": True},
             {"op": "delete", "paragraph_id": ids["quoted line"]},
+            {"op": "set_text", "paragraph_id": ids["In progress"], "content": "Done"},
+            {"op": "add_row", "paragraph_id": ids["Beta"], "cells": ["Gamma", "QA", "Planned"]},
+            {"op": "delete_row", "paragraph_id": ids["Cutover"]},
         ],
     )
     after = await read(page_id)
@@ -201,15 +215,21 @@ async def edit_checks(call, checks: Checks, root: Path, section_id: str, page_id
         and "quoted line" not in text,
         edited.get("error") or text,
     )
+    checks.add(
+        "edit_page edits table cells and rows",
+        "| Beta | Infra | Done |\n| Gamma | QA | Planned |" in text and "Cutover" not in text,
+        text,
+    )
     checks.add("edit_page keeps images and the title", images(after) == images(before) == 1 and after.get("title") == before.get("title"), {"before": images(before), "after": images(after), "title": after.get("title")})
 
     listed = await call("list_backups", page_identifier=page_id)
-    checks.add("edit_page saved a backup", edited.get("backup_id") in [b["backup_id"] for b in listed.get("backups", [])], listed)
+    kinds = {b["backup_id"]: b.get("kind") for b in listed.get("backups", [])}
+    checks.add("edit_page saved a backup of the changed block only", kinds.get(edited.get("backup_id")) == "blocks", listed)
 
-    restored = await call("restore_backup", backup_id=edited.get("backup_id") or 0, mode="replace")
+    restored = await call("restore_backup", backup_id=edited.get("backup_id") or 0)
     back = await read(page_id)
     checks.add(
-        "restore_backup(replace) brings the page back exactly",
+        "restore_backup puts the edited block back exactly",
         restored.get("ok") and back.get("text") == before.get("text") and images(back) == 1 and back.get("title") == before.get("title"),
         restored.get("error") or {"title": back.get("title"), "images": images(back), "text": back.get("text")},
     )

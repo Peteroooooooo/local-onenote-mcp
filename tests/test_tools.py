@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import os
 import xml.etree.ElementTree as ET
 
 import pytest
@@ -54,9 +56,10 @@ def backups_on(monkeypatch, tmp_path):
 def test_every_tool_is_registered_with_annotations():
     tools = {tool.name: tool for tool in app.mcp._tool_manager.list_tools()}
 
-    assert len(tools) == 40
+    assert len(tools) == 41
     assert tools["edit_page"].annotations.destructiveHint is True
     assert tools["get_page"].annotations.readOnlyHint is True
+    assert tools["view_page"].annotations.readOnlyHint is True
     assert "EditOperation" in str(tools["edit_page"].parameters)
 
 
@@ -108,15 +111,15 @@ def test_delete_page_content_points_paragraphs_to_their_block(fake):
     assert result["ok"] is False and "o1" in result["error"]
 
 
-def test_backup_then_restore_as_new_page_and_in_place(fake, backups_on):
+def test_whole_page_backup_restores_as_new_page_and_in_place(fake, backups_on):
     bridge = fake()
-    edited = run(writing.edit_page, PAGE, [{"op": "set_text", "paragraph_id": "a", "content": "changed"}])
+    deleted = run(writing.delete_page_content, PAGE, "img")
     listed = run(writing.list_backups, PAGE)
 
-    assert isinstance(edited["backup_id"], int)
-    assert listed["backups"][0]["path"] == "NB/Sec/Plan" and listed["backups"][0]["reason"] == "edit_page"
+    assert isinstance(deleted["backup_id"], int)
+    assert listed["backups"][0]["path"] == "NB/Sec/Plan" and listed["backups"][0]["kind"] == "page"
 
-    copy = run(writing.restore_backup, edited["backup_id"])
+    copy = run(writing.restore_backup, deleted["backup_id"])
     restored = ET.fromstring(bridge.updates[-1])
     assert copy["ok"] is True and copy["page_id"] != PAGE
     assert restored.attrib == {"ID": copy["page_id"]}
@@ -126,10 +129,124 @@ def test_backup_then_restore_as_new_page_and_in_place(fake, backups_on):
     assert restored.find(f".//{ONE}InsertedFile").attrib["pathSource"].endswith("doc.pdf")
 
     bridge.deleted.clear()
-    in_place = run(writing.restore_backup, edited["backup_id"], mode="replace")
+    in_place = run(writing.restore_backup, deleted["backup_id"], mode="replace")
     assert in_place["ok"] is True
     assert bridge.calls[-len(bridge.deleted) - 1][1]["force"] is True
     assert bridge.deleted == ["o1", "o2", "img", "f"]
+
+
+def test_edit_page_backs_up_only_the_changed_text_block(fake, backups_on):
+    bridge = fake()
+    edited = run(writing.edit_page, PAGE, [{"op": "set_text", "paragraph_id": "a", "content": "changed"}])
+    listed = run(writing.list_backups, PAGE)["backups"]
+
+    assert listed[0]["kind"] == "blocks" and listed[0]["reason"] == "edit_page"
+    assert all(params.get("page_info", 0) == 0 for op, params in bridge.calls if op == "get_page_content")
+    _meta, saved, _files = app.backups.load(edited["backup_id"])
+    assert [node.attrib["objectID"] for node in saved.findall(ONE + "Outline")] == ["o1"]
+    assert saved.find(ONE + "Image") is None and saved.find(ONE + "Title") is None
+    assert run(writing.restore_backup, edited["backup_id"], mode="new_page")["ok"] is False
+
+
+def test_blocks_restore_writes_the_old_outline_back(fake, backups_on):
+    bridge = fake()
+    edited = run(writing.edit_page, PAGE, [{"op": "set_text", "paragraph_id": "a", "content": "changed"}])
+    # Since the backup: paragraph b was deleted and OneNote renumbered the style definitions.
+    bridge.pages[PAGE] = (
+        PAGE_XML.replace('<one:QuickStyleDef index="0" name="p"/>', '<one:QuickStyleDef index="0" name="h1"/><one:QuickStyleDef index="1" name="p"/>')
+        .replace("ship in 2025", "changed")
+        .replace('<one:OE objectID="b"><one:T><![CDATA[second]]></one:T></one:OE>', "")
+        .replace('<one:OE objectID="a">', '<one:OE objectID="a" quickStyleIndex="1">')
+    )
+
+    restored = run(writing.restore_backup, edited["backup_id"])
+    update = ET.fromstring(bridge.updates[-1])
+    paragraphs = {oe.find(ONE + "T").text: oe.attrib for oe in update.iter(ONE + "OE")}
+
+    assert restored["ok"] is True and restored["page_id"] == PAGE
+    assert [node.attrib["objectID"] for node in update.findall(ONE + "Outline")] == ["o1"]
+    assert update.find(ONE + "Image") is None
+    assert paragraphs == {"ship in 2025": {"objectID": "a"}, "second": {}}
+    assert [d.attrib["name"] for d in update.findall(ONE + "QuickStyleDef")] == ["h1", "p"]
+    assert isinstance(restored["backup_id"], int)
+
+
+def test_a_deleted_block_comes_back_as_a_new_outline(fake, backups_on):
+    bridge = fake()
+    edited = run(writing.edit_page, PAGE, [{"op": "delete", "paragraph_id": "c"}])
+    bridge.pages[PAGE] = PAGE_XML.replace('<one:Outline objectID="o2"><one:OEChildren><one:OE objectID="c"><one:T><![CDATA[alone]]></one:T></one:OE></one:OEChildren></one:Outline>', "")
+
+    run(writing.restore_backup, edited["backup_id"])
+    outline = ET.fromstring(bridge.updates[-1]).find(ONE + "Outline")
+
+    assert bridge.deleted == ["o2"]
+    assert "objectID" not in outline.attrib and outline.find(f".//{ONE}T").text == "alone"
+
+
+def test_restoring_blocks_remaps_style_indexes(fake, backups_on):
+    bridge = fake()
+    page = PAGE_XML.replace('<one:OE objectID="a">', '<one:OE objectID="a" quickStyleIndex="0">')
+    bridge.pages[PAGE] = page
+    edited = run(writing.edit_page, PAGE, [{"op": "set_text", "paragraph_id": "a", "content": "changed"}])
+    bridge.pages[PAGE] = page.replace('<one:QuickStyleDef index="0" name="p"/>', '<one:QuickStyleDef index="0" name="h1"/><one:QuickStyleDef index="1" name="p"/>')
+
+    run(writing.restore_backup, edited["backup_id"])
+    update = ET.fromstring(bridge.updates[-1])
+
+    assert update.find(f".//{ONE}OE[@objectID='a']").attrib["quickStyleIndex"] == "1"
+
+
+def test_edit_next_to_an_image_takes_a_whole_page_backup(fake, backups_on):
+    page = PAGE_XML.replace('<one:OE objectID="b">', '<one:OE objectID="pic"><one:Image format="png"><one:CallbackID callbackID="cb2"/></one:Image></one:OE><one:OE objectID="b">')
+    bridge = fake(pages={PAGE: page})
+    edited = run(writing.edit_page, PAGE, [{"op": "set_text", "paragraph_id": "a", "content": "changed"}])
+
+    assert run(writing.list_backups, PAGE)["backups"][0]["kind"] == "page"
+    assert any(params.get("page_info") for op, params in bridge.calls if op == "get_page_content")
+    assert edited["ok"] is True
+
+
+def test_transient_class_not_registered_is_retried_for_safe_calls(fake, monkeypatch):
+    from local_onenote_mcp.bridge import OneNoteBridgeError
+    from local_onenote_mcp.onenote import CLASS_NOT_REGISTERED
+
+    bridge = fake()
+    failures = {"get_hierarchy": 1, "update_page_content": 1}
+    real_call = bridge.call
+
+    def flaky(operation, **params):
+        if failures.get(operation):
+            failures[operation] -= 1
+            raise OneNoteBridgeError("没有注册类", hresult=CLASS_NOT_REGISTERED)
+        return real_call(operation, **params)
+
+    monkeypatch.setattr(bridge, "call", flaky)
+    monkeypatch.setattr("local_onenote_mcp.onenote.time.sleep", lambda seconds: None)
+
+    assert run(reading.list_notebooks)["ok"] is True
+    assert run(writing.update_page_title, PAGE, "x")["ok"] is False
+    assert bridge.updates == []
+
+
+def test_view_page_returns_one_image_per_printed_page(fake, monkeypatch):
+    bridge = fake()
+    published = []
+
+    def publish(object_id, target_path, format):
+        published.append(target_path)
+        open(target_path, "wb").close()
+        return {"path": target_path}
+
+    def render_pdf(path, width, max_pages):
+        return {"pages": 4, "images": [base64.b64encode(b"\xff\xd8jpeg").decode()] * max_pages}
+
+    monkeypatch.setattr(bridge, "publish", publish, raising=False)
+    monkeypatch.setattr(bridge, "render_pdf", render_pdf, raising=False)
+    result = run(reading.view_page, PAGE, max_pages=2)
+
+    assert result[0] == "Printed pages 1-2 of 4."
+    assert [image.data for image in result[1:]] == [b"\xff\xd8jpeg"] * 2
+    assert published and not os.path.exists(published[0])
 
 
 def test_copy_page_writes_a_clean_copy_into_the_section(fake):

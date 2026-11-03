@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import sys
+import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +14,7 @@ from mcp.server.fastmcp.utilities.types import Image
 from .. import __version__
 from ..app import READ_ONLY, backups, indexer, ok, onenote, settings, text_index, tool
 from ..backup import FILE_TAGS
-from ..constants import SPECIAL_LOCATIONS, XML_SCHEMA_2013
+from ..constants import PUBLISH_FORMATS, SPECIAL_LOCATIONS, XML_SCHEMA_2013
 from ..editing import PageEditor
 from ..hierarchy import of_type, parse_hierarchy, parse_xml, resolve_item, without_recycle_bin
 from ..pages import file_bytes
@@ -203,6 +205,28 @@ def get_page_image(page_identifier: str, callback_id: str) -> Any:
     if len(raw) > MAX_IMAGE_BYTES:
         raise ValueError(f"Image is {len(raw) // 1024} KB, above the {MAX_IMAGE_BYTES // 1024} KB inline limit; use get_binary_content.")
     return Image(data=raw, format=fmt)
+
+
+@tool(READ_ONLY, structured=False)
+def view_page(page_identifier: str, max_pages: int = 3, width: int = 1000) -> Any:
+    """Show a page to the model as it looks in OneNote, including handwriting, drawings and layout.
+
+    The page is printed to PDF and each printed (A4) page becomes one JPEG image, width pixels wide.
+    Use it for pages whose ink or layout get_page cannot put into text.
+    """
+
+    page_id = onenote.resolve(page_identifier, "page")["id"]
+    pdf = Path(tempfile.gettempdir()) / f"local-onenote-mcp-{uuid.uuid4().hex}.pdf"
+    try:
+        onenote.call("publish", object_id=page_id, target_path=str(pdf), format=PUBLISH_FORMATS["pdf"])
+        rendered = onenote.call("render_pdf", path=str(pdf), width=min(max(width, 200), 2000), max_pages=min(max(max_pages, 1), 10))
+    finally:
+        pdf.unlink(missing_ok=True)
+    images = rendered.get("images") or []
+    if isinstance(images, str):
+        images = [images]
+    shown = f"pages 1-{len(images)}" if len(images) > 1 else "page 1"
+    return [f"Printed {shown} of {rendered['pages']}.", *(Image(data=base64.b64decode(data), format="jpeg") for data in images)]
 
 
 @tool(READ_ONLY)

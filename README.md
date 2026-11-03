@@ -89,7 +89,7 @@ Write tools (`create_page`, `append_to_page`, `edit_page`, `replace_page_body`) 
 
 `append_to_page` and `add_image_to_page` place the new block below the page's existing content unless you pass `x`/`y`.
 
-`get_page` takes `format` = `text` or `markdown` and `include_ocr` (default `true`). Markdown read-back maps the same structures back (headings, lists, `- [x]` to-dos, tables, code fences, image OCR text as quotes). Handwriting that OneNote has recognised is read as text; other ink is marked `[Handwriting: …]`.
+`get_page` takes `format` = `text` or `markdown` and `include_ocr` (default `true`). Markdown read-back maps the same structures back (headings, lists, `- [x]` to-dos, tables, code fences, image OCR text as quotes). Handwriting that OneNote has recognised is read as text; other ink is marked `[Handwriting: …]`. To see such a page, `view_page` prints it to PDF in OneNote and returns each printed page as a JPEG image (about 1.3 s for a one-page note, 240 KB per image at the default 1000 px width).
 
 ---
 
@@ -103,7 +103,8 @@ Write tools (`create_page`, `append_to_page`, `edit_page`, `replace_page_body`) 
   {"op": "set_text", "paragraph_id": "{…}{48}{B0}", "content": "**new** wording"},
   {"op": "insert_after", "paragraph_id": "{…}{51}{B0}", "content": "- extra item\n- [ ] follow-up"},
   {"op": "set_todo", "paragraph_id": "{…}{55}{B0}", "done": true},
-  {"op": "delete", "paragraph_id": "{…}{60}{B0}"}
+  {"op": "delete", "paragraph_id": "{…}{60}{B0}"},
+  {"op": "add_row", "paragraph_id": "{…}{70}{B0}", "cells": ["Gamma", "QA", "Planned"]}
 ]
 ```
 
@@ -111,6 +112,7 @@ Write tools (`create_page`, `append_to_page`, `edit_page`, `replace_page_body`) 
 - `set_text` keeps the paragraph's bullet, number, to-do box and style.
 - `insert_after` / `insert_before` take any amount of Markdown, HTML or plain text and reuse the page's own heading and To Do definitions.
 - `delete` removes the paragraph and its indented children; a block left empty is removed.
+- Table cells are paragraphs too: `get_page(include_paragraphs=true)` gives each one its `table`, `row` and `column`. `set_text` changes a cell, `add_row` adds a row after the row of the given cell (or at the end, given the table's own paragraph), `delete_row` removes the row of the given cell. Deleting the only paragraph of a cell empties it.
 
 If one operation is invalid (for example an unknown paragraph ID), nothing is written.
 
@@ -118,11 +120,12 @@ If one operation is invalid (for example an unknown paragraph ID), nothing is wr
 
 ## Backups
 
-Every destructive tool (`edit_page`, `replace_page_body`, `delete_page_content`, `update_page_xml`, `delete_hierarchy`, `restore_backup` itself) first saves the page to `%LOCALAPPDATA%\local-onenote-mcp\backups.sqlite3`. `list_backups` shows them and `restore_backup` brings one back, either into the original page (`mode="replace"`) or as a new page (`mode="new_page"`, the default, which also works after the page was deleted).
+Every destructive tool (`edit_page`, `replace_page_body`, `delete_page_content`, `update_page_xml`, `delete_hierarchy`, `restore_backup` itself) first saves the page to `%LOCALAPPDATA%\local-onenote-mcp\backups.sqlite3`. `list_backups` shows them and `restore_backup` brings one back, either into the original page (`mode="replace"`) or as a new page (`mode="new_page"`, which also works after the page was deleted). The default, `mode="auto"`, puts block backups back in place and restores whole pages as new pages.
 
 The store stays small and bounded:
 
 - **Images, ink and attachments are stored once.** Each is kept by its SHA-256 hash; ten backups of a page with the same photo store the photo once. The page XML itself is zlib-compressed.
+- **`edit_page` saves only the blocks it changes** (backup kind `blocks`): the text block's XML, a few KB, without reading the page's images. If a changed block holds an image, ink or a file, the whole page is saved instead.
 - **Unchanged pages are not saved again.** If the page is identical to its newest backup, that backup is reused.
 - **Old backups are dropped automatically:** at most 10 per page, none older than 30 days, and the whole file under 200 MB (oldest first; the newest backup is always kept). Images that no backup uses any more are deleted and the file shrinks.
 
@@ -140,6 +143,7 @@ Each tool is annotated as read-only, writing, or destructive, so MCP clients can
 * `list_notebooks` / `list_sections` / `list_pages` / `list_hierarchy`: Traverse the live OneNote structure. `list_hierarchy` returns at most `max_items` (default 500) and reports `total` / `truncated`.
 * `get_page`: Title and body as text or Markdown. `include_paragraphs=true` lists paragraph IDs for `edit_page`; `include_objects=true` lists outlines, images, ink and attachments with `object_id` and `callback_id`; `include_xml=true` adds the raw page XML.
 * `get_page_image`: Return an image from a page as MCP image content, so the model can look at it.
+* `view_page`: Show the whole page as it looks in OneNote (handwriting, drawings, layout) as JPEG images, one per printed page.
 * `get_binary_content`: Download an image (`callback_id`) or attached file (`file_name`), as base64 or straight to a file with `save_to`.
 * `search_pages`: Pages containing every word of the query, ranked (title matches first, then number of occurrences in the body). `modified_after` / `modified_before` filter by edit date; with no query they list the pages edited in that window, newest first.
 * `get_hyperlink`
@@ -147,7 +151,7 @@ Each tool is annotated as read-only, writing, or destructive, so MCP clients can
 ### 2. Creation & Edits
 * `open_hierarchy` / `create_notebook` / `create_section` / `create_section_group`
 * `create_page`, `update_page_title`, `append_to_page`, `add_image_to_page`, `add_file_to_page`
-* `edit_page`: Change, insert, delete or tick single paragraphs (see above).
+* `edit_page`: Change, insert, delete or tick single paragraphs, and edit table cells and rows (see above).
 * `copy_page`: Copy a page with its images, handwriting and attachments into any section.
 * `replace_page_body`: Replace the whole body. Writes the new body first, then removes the old objects, so a failed write never empties the page.
 * `delete_page_content`, `delete_hierarchy` (pages are always matched by ID, so a page with a duplicate title is never touched)
@@ -230,10 +234,12 @@ The index is stored at `%LOCALAPPDATA%\local-onenote-mcp\text-index.sqlite3` and
 .\.venv\Scripts\python.exe scripts\e2e_onenote.py
 ```
 
-`e2e_onenote.py` runs 27 checks against the real OneNote app, including partial edits, backup and restore, copying a page with an image and an attachment, moving pages and sections between two notebooks, and confirming the result after closing and reopening them. It also exports its test page to PDF and prints the folder, so formatting can be checked by eye.
+`e2e_onenote.py` runs 30 checks against the real OneNote app, including partial edits of text and tables, block and whole-page restores, `view_page`, copying a page with an image and an attachment, moving pages and sections between two notebooks, and confirming the result after closing and reopening them. It also exports its test page to PDF and prints the folder, so formatting can be checked by eye.
 
 ---
 
 ## Limits & Boundaries
+
+OneNote sometimes answers "class not registered" for a moment while it rewrites notebook files; reads and hierarchy updates are retried once after 0.5 s.
 
 This server relies on the Windows COM API, so it runs only on Windows, for the signed-in local user, with the OneNote desktop app installed. COM calls are serialized through one bridge process; a tool call waits for at most one background-index page read. OneNote's own search index can lag behind very recent edits, which is why `search_pages` falls back to a text scan.
