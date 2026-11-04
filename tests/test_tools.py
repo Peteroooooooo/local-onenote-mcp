@@ -394,3 +394,51 @@ def test_delete_item_refuses_notebooks(fake):
     result = run(organizing.delete_item, NB)
 
     assert result["ok"] is False and "close_notebook" in result["error"]
+
+
+def test_move_page_reports_pages_whose_level_changed_as_a_side_effect(fake):
+    bridge = fake(_section(("X", 1), ("A", 1), ("A1", 2), ("B", 1)), {})
+    result = run(organizing.move_page, "A", include_subpages=False)
+
+    assert _order(bridge.submitted[0]) == [("X", "1"), ("A1", "1"), ("B", "1"), ("A", "1")]
+    assert result["other_level_changes"] == [{"page": "A1", "page_id": "A1", "from_level": 2, "to_level": 1}]
+
+
+def test_move_page_refuses_to_top_as_a_subpage(fake):
+    bridge = fake(_section(("A", 1), ("B", 1)), {})
+
+    assert run(organizing.move_page, "B", to_top=True, level=2)["ok"] is False
+    assert bridge.submitted == []
+
+
+def test_section_groups_cannot_be_reordered(fake):
+    bridge = fake(
+        f'<one:Notebooks xmlns:one="{NS}"><one:Notebook ID="NB" name="NB">'
+        '<one:SectionGroup ID="G1" name="A"/><one:SectionGroup ID="G2" name="B"/></one:Notebook></one:Notebooks>',
+        {},
+    )
+    result = run(organizing.move_section, "NB/B", "", to_top=True)
+
+    assert result["ok"] is False and "sorted by name" in result["error"]
+    assert bridge.submitted == []
+
+
+def test_a_page_cannot_be_renamed_to_nothing(fake):
+    bridge = fake()
+
+    assert run(organizing.rename_item, PAGE, "   ")["ok"] is False
+    assert bridge.updates == []
+
+
+def test_create_item_reports_a_section_that_already_exists(fake):
+    bridge = fake()
+    result = run(writing.create_item, "section", "sec", NB)
+
+    assert result["ok"] is True and result["already_existed"] is True and result["section_id"] == SEC
+    assert not [op for op, _ in bridge.calls if op == "open_hierarchy"]
+
+
+def test_a_title_with_spaces_around_a_slash_resolves_by_name(fake):
+    fake(HIERARCHY.replace('name="Old"', 'name="Q1 / Q2"'), {})
+
+    assert app.onenote.resolve("q1 / q2")["id"] == oid(4)

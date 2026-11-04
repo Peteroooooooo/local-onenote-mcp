@@ -47,11 +47,12 @@ def _index_of(pages: list[ET.Element], page_id: str) -> int:
     raise RuntimeError("The page was not found in its section; refresh and try again.")
 
 
-def _submit_pages(section: ET.Element) -> None:
+def _submit_pages(section: ET.Element, before: dict[str, int], moved: set[str]) -> list[dict[str, Any]]:
     """Submit a section's page order, first making every page at most one level deeper than the page above it.
 
     OneNote crashes (onmain.dll access violation) on a page list with a level jump such as 1 -> 3, and it can
     leave such jumps behind itself, e.g. after the parent of a level-3 page was deleted.
+    Returns the pages outside `moved` whose level changed, so the caller can tell the user.
     """
 
     previous = 0
@@ -61,6 +62,29 @@ def _submit_pages(section: ET.Element) -> None:
             node.set("pageLevel", str(level))
         previous = level
     onenote.submit_tree(section)
+    return [
+        {"page": node.attrib.get("name", ""), "page_id": node.attrib["ID"], "from_level": before[node.attrib["ID"]], "to_level": _level(node)}
+        for node in _pages(section)
+        if node.attrib.get("ID") in before and node.attrib["ID"] not in moved and before[node.attrib["ID"]] != _level(node)
+    ]
+
+
+def _levels(section: ET.Element) -> dict[str, int]:
+    return {node.attrib["ID"]: _level(node) for node in _pages(section) if node.attrib.get("ID")}
+
+
+def _shift_block(block: list[ET.Element], new_level: int) -> None:
+    """Give the block's first page new_level, keeping its subpages' depth below it; refuse to go past level 3."""
+
+    shift = new_level - _level(block[0])
+    deepest = max(_level(node) for node in block) + shift
+    if deepest > 3:
+        raise ValueError(
+            f"That would put subpages at level {deepest}; OneNote has only 3 levels. "
+            "Use a smaller level, include_subpages=false, or move the deepest subpages first."
+        )
+    for node in block:
+        node.set("pageLevel", str(max(1, _level(node) + shift)))
 
 
 def _settle(notebook_ids: set[str], old_file: str) -> bool:
@@ -104,17 +128,30 @@ def move_page(
         raise ValueError("level must be 1, 2 or 3 (0 = leave as moved).")
     if level and not (destination_section_identifier or after_page_identifier or to_top):
         page = _live(page_identifier, "page")
-        _set_level(page["id"], page["parent_id"], level)
-        return ok(page_id=page["id"], level=level)
+        others = _set_level(page["id"], page["parent_id"], level, include_subpages)
+        return _with_side_effects(ok(page_id=page["id"], level=level), others)
+    if to_top and level > 1:
+        raise ValueError("The first page of a section cannot be a subpage; use level=1 or another position.")
     page = _live(page_identifier, "page")
     source_id = page["parent_id"]
     destination_id = _live(destination_section_identifier, "section")["id"] if destination_section_identifier else source_id
     same_section = destination_id == source_id
 
     source = onenote.tree(source_id, "pages")
-    block = _block(_pages(source), _index_of(_pages(source), page["id"]), include_subpages)
+    index = _index_of(_pages(source), page["id"])
+    block = _block(_pages(source), index, include_subpages)
     block_ids = [node.attrib["ID"] for node in block]
+    # Subpages left behind rise one level, so they do not end up under whichever page was above their parent.
+    left_behind = [] if include_subpages else _block(_pages(source), index)[1:]
+    source_before = _levels(source)
+    for node in left_behind:
+        node.set("pageLevel", str(max(1, _level(node) - 1)))
+    promoted: list[dict[str, Any]] = []
+    if left_behind and not same_section:
+        promoted = _submit_pages(source, source_before, set(block_ids))
+        source = onenote.tree(source_id, "pages")
     target = source if same_section else onenote.tree(destination_id, "pages")
+    before = source_before if same_section else _levels(target)
     if same_section:
         for node in block:
             target.remove(node)
@@ -152,12 +189,10 @@ def move_page(
     if new_level > 1 and (above is None or _level(above) < new_level - 1):
         raise ValueError("A subpage needs a page directly above it one level higher; choose another position or level.")
 
-    shift = _level(block[0]) - new_level
-    for node in block:
-        node.set("pageLevel", str(min(3, max(1, _level(node) - shift))))
+    _shift_block(block, new_level)
     for offset, node in enumerate(block):
         target.insert(insert_at + offset, node)
-    _submit_pages(target)
+    others = _submit_pages(target, before, set(block_ids))
 
     if same_section:
         new_ids = block_ids
@@ -174,22 +209,31 @@ def move_page(
                 f"{len(left)} still in the source)."
             )
     moved = [{"old_id": old, "new_id": new} for old, new in zip(block_ids, new_ids)]
-    return ok(page_id=new_ids[0], page=onenote.lookup(new_ids[0]), moved_pages=moved, destination_section_id=destination_id)
+    data = ok(page_id=new_ids[0], page=onenote.lookup(new_ids[0]), moved_pages=moved, destination_section_id=destination_id)
+    return _with_side_effects(data, promoted + others)
 
 
-def _set_level(page_id: str, section_id: str, level: int) -> None:
-    """Indent a page (its subpages keep their depth below it) or promote it to level 1."""
+def _with_side_effects(data: dict[str, Any], others: list[dict[str, Any]]) -> dict[str, Any]:
+    if others:
+        data["other_level_changes"] = others
+        data["note"] = (
+            "OneNote nests pages by position: other pages changed level with this move (listed in other_level_changes)."
+        )
+    return data
+
+
+def _set_level(page_id: str, section_id: str, level: int, include_subpages: bool = True) -> list[dict[str, Any]]:
+    """Indent a page (its subpages keep their depth below it, unless include_subpages=false) or promote it."""
 
     tree = onenote.tree(section_id, "pages")
+    before = _levels(tree)
     pages = _pages(tree)
     index = _index_of(pages, page_id)
     if level > 1 and (index == 0 or _level(pages[index - 1]) < level - 1):
         raise ValueError("A subpage needs a page directly above it one level higher; move the page first.")
-    block = _block(pages, index)
-    shift = level - _level(pages[index])
-    for node in block:
-        node.set("pageLevel", str(min(3, max(1, _level(node) + shift))))
-    _submit_pages(tree)
+    block = _block(pages, index, include_subpages)
+    _shift_block(block, level)
+    return _submit_pages(tree, before, {node.attrib["ID"] for node in block})
 
 
 def _siblings(tree: ET.Element, tag: str) -> list[ET.Element]:
@@ -231,15 +275,23 @@ def _move_section(section_identifier: str, destination_identifier: str, after_id
 
     tag = "Section" if item["type"] == "section" else "SectionGroup"
     same_parent = destination["id"] == item["parent_id"]
+    if tag == "SectionGroup" and (after_identifier or to_top or same_parent):
+        raise ValueError(
+            "OneNote keeps section groups sorted by name, so their position cannot be chosen; "
+            "move it into another notebook or group, or rename it to change where it sorts."
+        )
+    if after_identifier and onenote.resolve(after_identifier)["id"] == item["id"]:
+        raise ValueError("after_identifier is the item being moved; give the sibling it should follow.")
     if tag == "SectionGroup" and not same_parent and onenote.notebook_of(item) != onenote.notebook_of(destination):
-        return _move_group_to_notebook(item, destination, after_identifier, to_top)
+        return _move_group_to_notebook(item, destination)
     target = onenote.tree(destination["id"], "sections")
     if same_parent:
         node = next(child for child in target if child.attrib.get("ID") == item["id"])
         target.remove(node)
     else:
-        if any(child.attrib.get("name", "").casefold() == item["name"].casefold() for child in _siblings(target, tag)):
-            raise ValueError(f"'{destination['path']}' already has a {item['type']} named '{item['name']}'; rename one first.")
+        clash = next((child for child in _siblings(target, tag) if child.attrib.get("name", "").casefold() == item["name"].casefold()), None)
+        if clash is not None:
+            raise ValueError(f"'{destination['path']}' already has a {item['type']} named '{clash.attrib.get('name')}'; rename one first.")
         node = onenote.tree(item["id"], "sections")
         # Moving up into an ancestor: its tree still holds the item further down; submitting both copies
         # leaves the item where it was.
@@ -284,7 +336,7 @@ def _wait_for_parent(item: Item, parent_id: str, tries: int = 8) -> Item | None:
     return None
 
 
-def _move_group_to_notebook(item: Item, destination: Item, after_identifier: str, to_top: bool) -> dict[str, Any]:
+def _move_group_to_notebook(item: Item, destination: Item) -> dict[str, Any]:
     """Move a section group into another notebook by recreating it there and moving its contents into it.
 
     OneNote crashes or leaves a copy behind when a section group itself is moved across notebooks; sections
@@ -292,14 +344,13 @@ def _move_group_to_notebook(item: Item, destination: Item, after_identifier: str
     """
 
     target = onenote.tree(destination["id"], "sections")
-    if any(child.attrib.get("name", "").casefold() == item["name"].casefold() for child in _siblings(target, "SectionGroup")):
-        raise ValueError(f"'{destination['path']}' already has a section_group named '{item['name']}'; rename one first.")
+    clash = next((child for child in _siblings(target, "SectionGroup") if child.attrib.get("name", "").casefold() == item["name"].casefold()), None)
+    if clash is not None:
+        raise ValueError(f"'{destination['path']}' already has a section_group named '{clash.attrib.get('name')}'; rename one first.")
     result = onenote.call("open_hierarchy", path=item["name"], relative_to_id=destination["id"], create_file_type=CREATE_FILE_TYPES["section_group"])
     group = onenote.wait_for(item_type="section_group", path=f"{destination['path']}/{item['name']}", id=result["object_id"])
     if group is None:
         raise RuntimeError(f"Could not create section group '{item['name']}' in '{destination['path']}'.")
-    if after_identifier or to_top:
-        _move_section(group["id"], "", after_identifier, to_top)
     source = onenote.tree(item["id"], "sections")
     moved = []
     for child in [node for node in source if node.attrib.get("isRecycleBin") != "true" and node.tag in {ONE + "Section", ONE + "SectionGroup"}]:
@@ -324,8 +375,11 @@ def rename_item(identifier: str, new_name: str) -> dict[str, Any]:
 
     item = _live(identifier)
     if item["type"] == "page":
-        onenote.update_page(build_page_update_xml(item["id"], title=new_name))
-        return ok(object_id=item["id"], name=new_name)
+        title = " ".join(new_name.split())
+        if not title:
+            raise ValueError("A page title cannot be empty.")
+        onenote.update_page(build_page_update_xml(item["id"], title=title))
+        return ok(object_id=item["id"], name=title)
     if item["type"] not in {"section", "section_group"}:
         raise ValueError("Only pages, sections and section groups can be renamed here.")
     name = safe_leaf_name(new_name)
@@ -360,7 +414,23 @@ def merge_sections(source_section_identifier: str, destination_section_identifie
         raise ValueError("The source and destination are the same section.")
     count = len(_pages(onenote.tree(source["id"], "pages")))
     before = len(_pages(onenote.tree(destination["id"], "pages")))
-    onenote.call("merge_sections", source_section_id=source["id"], destination_section_id=destination["id"])
+    method = "onenote_merge"
+    try:
+        onenote.call("merge_sections", source_section_id=source["id"], destination_section_id=destination["id"])
+    except RuntimeError as exc:
+        # OneNote's merge fails (0x8004201F) for a few minutes after the source section changed; moving the pages
+        # through the hierarchy does the same thing and works at once.
+        if "8004201F" not in str(exc):
+            raise
+        method = "page_move"
+        target = onenote.tree(destination["id"], "pages")
+        pages = _pages(onenote.tree(source["id"], "pages"))
+        children = list(target)
+        last = _pages(target)[-1] if _pages(target) else None
+        insert_at = children.index(last) + 1 if last is not None else len(children)
+        for offset, node in enumerate(pages):
+            target.insert(insert_at + offset, node)
+        _submit_pages(target, {}, set())
     after = before
     for _ in range(20):
         after = len(_pages(onenote.tree(destination["id"], "pages")))
@@ -376,6 +446,7 @@ def merge_sections(source_section_identifier: str, destination_section_identifie
         source_section_id=source["id"],
         destination_section_id=destination["id"],
         merged_pages=count,
+        method=method,
         source_deleted="moved to the recycle bin",
     )
 

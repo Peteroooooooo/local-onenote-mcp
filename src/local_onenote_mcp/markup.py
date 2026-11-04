@@ -198,7 +198,9 @@ def parse_html(content: str) -> Node:
 def markdown_to_html(content: str) -> str:
     """Render CommonMark (plus GFM tables and strikethrough) to HTML."""
 
-    return _markdown.render(content or "")
+    # A paragraph's leading no-break spaces are indentation (get_page writes them so); the parser would trim them.
+    content = re.sub(r"(?m)^( {0,3})(\xa0+)", lambda m: m.group(1) + "&#160;" * len(m.group(2)), content or "")
+    return _markdown.render(content)
 
 
 def markdown_inline_to_html(content: str) -> str:
@@ -229,6 +231,17 @@ def _render_attrs(node: Node) -> str:
     return (" " + " ".join(parts)) if parts else ""
 
 
+def _collapse(text: str) -> str:
+    """HTML whitespace rules for source line breaks, but runs of spaces typed on one line are kept.
+
+    A line break and the indentation around it is source formatting and becomes one space. Several spaces in a
+    row are meant (aligned comments, ASCII diagrams), so they become no-break spaces, which OneNote keeps.
+    """
+
+    text = re.sub(r"[ \t\r\f\v]*\n[ \t\r\n\f\v]*", " ", text.replace("\t", "    "))
+    return re.sub(r" {2,}", lambda run: " " + "\xa0" * (len(run.group()) - 1), text)
+
+
 def render_inline(nodes: list[Node | str], *, preserve_whitespace: bool = False) -> str:
     """Render inline nodes to the inline HTML subset OneNote keeps in one:T.
 
@@ -238,7 +251,7 @@ def render_inline(nodes: list[Node | str], *, preserve_whitespace: bool = False)
     parts: list[str] = []
     for node in nodes:
         if isinstance(node, str):
-            text = node if preserve_whitespace else re.sub(r"\s+", " ", node)
+            text = node if preserve_whitespace else _collapse(node)
             parts.append(html.escape(text, quote=False))
             continue
         tag = node.tag
@@ -279,10 +292,11 @@ def render_inline(nodes: list[Node | str], *, preserve_whitespace: bool = False)
 
 
 def _tidy_breaks(fragment: str) -> str:
-    fragment = re.sub(r"\s*<br/>\s*", "<br/>", fragment)
+    # Only ordinary whitespace is trimmed; no-break spaces are deliberate indentation.
+    fragment = re.sub(r"[ \t\r\n]*<br/>[ \t\r\n]*", "<br/>", fragment)
     fragment = re.sub(r"(?:<br/>){3,}", "<br/><br/>", fragment)
     fragment = re.sub(r"^(?:<br/>)+|(?:<br/>)+$", "", fragment)
-    return fragment.strip()
+    return fragment.strip(" \t\r\n")
 
 
 def html_to_inline(content: str) -> str:

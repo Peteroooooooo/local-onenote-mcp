@@ -99,6 +99,40 @@ def test_whitespace_only_content_adds_no_empty_block_and_titles_are_one_line():
 # -- edit_page ---------------------------------------------------------------
 
 
+def test_inline_code_covering_a_paragraph_or_cell_stays_inline_code():
+    xml = (
+        f'<one:Page xmlns:one="{NS}" ID="p"><one:Outline><one:OEChildren>'
+        "<one:OE style='font-family:Consolas;font-size:10.0pt'><one:T><![CDATA[npm install]]></one:T></one:OE>"
+        "<one:OE><one:Table><one:Row><one:Cell><one:OEChildren><one:OE style='font-family:Consolas'><one:T><![CDATA[a|b]]></one:T></one:OE>"
+        "</one:OEChildren></one:Cell></one:Row></one:Table></one:OE></one:OEChildren></one:Outline></one:Page>"
+    )
+
+    assert render_page(xml, "markdown") == "`npm install`\n\n| `a\\|b` |\n| --- |"
+
+
+def test_spaces_inside_a_line_and_leading_indent_survive():
+    once = markdown("\xa0\xa0indented\n\nprint(x)        # comment")
+
+    assert once == "\xa0\xa0indented\n\nprint(x)        # comment"
+    assert markdown(once) == once
+
+
+def test_emphasis_on_part_of_a_heading_is_kept_but_the_heading_bold_is_not():
+    assert markdown("## New *heading*") == "## New *heading*"
+    assert markdown("# **all bold**") == "# all bold"
+
+
+def test_set_text_drops_the_old_paragraph_code_font():
+    page = PageEditor(ET.fromstring(NESTED.replace('<one:OE objectID="b">', '<one:OE objectID="b" style="font-family:Consolas;font-size:10.0pt">')))
+    page.set_text(page._locate("b"), "prose", "plain")
+
+    assert page._locate("b").oe.attrib["style"] == "font-size:10.0pt"
+
+
+def test_a_rule_reads_back_as_a_rule():
+    assert markdown("a\n\n---\n\nb") == "a\n\n---\n\nb"
+
+
 def test_set_text_reads_markdown_inline_only():
     page = editor()
     for content in ("2026.", "# not a heading", "- not a list"):

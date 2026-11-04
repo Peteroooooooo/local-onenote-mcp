@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
@@ -40,8 +41,9 @@ def create_item(kind: str, name: str, parent_identifier: str = "") -> dict[str, 
         raw = Path(name)
         if not raw.is_absolute():
             raw = Path(onenote.call("get_special_location", location=SPECIAL_LOCATIONS["default_notebook_folder"])["path"]) / safe_leaf_name(name)
+        existed = raw.exists()
         result = onenote.call("open_hierarchy", path=str(raw), relative_to_id="", create_file_type=CREATE_FILE_TYPES["notebook"])
-        return ok(path=str(raw), notebook_id=result["object_id"], item=onenote.lookup(result["object_id"]))
+        return ok(path=str(raw), notebook_id=result["object_id"], already_existed=existed, item=onenote.lookup(result["object_id"]))
     if kind not in {"section", "section_group"}:
         raise ValueError("kind must be notebook, section or section_group.")
     if not parent_identifier:
@@ -52,15 +54,24 @@ def create_item(kind: str, name: str, parent_identifier: str = "") -> dict[str, 
     leaf = safe_leaf_name(name)
     if kind == "section" and not leaf.lower().endswith(".one"):
         leaf += ".one"
-    result = onenote.call("open_hierarchy", path=leaf, relative_to_id=parent["id"], create_file_type=CREATE_FILE_TYPES[kind])
     expected = child_path(parent["path"], leaf)
+    tag = "Section" if kind == "section" else "SectionGroup"
+    display = leaf[:-4] if kind == "section" else leaf
+    for child in onenote.tree(parent["id"], "children"):
+        if child.tag.endswith("}" + tag) and child.attrib.get("name", "").casefold() == display.casefold():
+            item = onenote.lookup(child.attrib["ID"])
+            return ok(parent=parent, item=item, path=expected, already_existed=True, **{f"{kind}_id": child.attrib["ID"]})
+    result = onenote.call("open_hierarchy", path=leaf, relative_to_id=parent["id"], create_file_type=CREATE_FILE_TYPES[kind])
     item = onenote.wait_for(item_type=kind, path=expected, id=result["object_id"])
-    return ok(parent=parent, item=item, path=expected, **{f"{kind}_id": item["id"] if item else result["object_id"]})
+    return ok(parent=parent, item=item, path=expected, already_existed=False, **{f"{kind}_id": item["id"] if item else result["object_id"]})
 
 
 @tool(WRITES)
 def open_notebook(path: str) -> dict[str, Any]:
-    """Open an existing notebook folder (or a .one section file) in OneNote. Opening one that is already open is fine."""
+    """Open an existing notebook folder (or a .one section file) in OneNote. Opening one that is already open is fine.
+
+    Object IDs inside a notebook can change after it is closed and opened again, so look items up afresh afterwards.
+    """
 
     raw = path.strip().strip('"')
     target = Path(raw).expanduser()
@@ -73,7 +84,24 @@ def open_notebook(path: str) -> dict[str, Any]:
     if not target.exists():
         raise ValueError(f"Nothing at {target}; give a notebook folder or a .one file.")
     result = onenote.call("open_hierarchy", path=str(target), relative_to_id="", create_file_type=CREATE_FILE_TYPES["none"])
-    return ok(object_id=result["object_id"], item=onenote.lookup(result["object_id"]))
+    sections = _wait_for_sections(result["object_id"], expect=target.is_dir() and any(target.glob("*.one")))
+    onenote.invalidate()
+    return ok(object_id=result["object_id"], sections=sections, item=onenote.lookup(result["object_id"]))
+
+
+def _wait_for_sections(object_id: str, expect: bool, tries: int = 12, delay: float = 0.5) -> int:
+    """OneNote loads a just-opened notebook's sections in the background; wait for them when the folder has any."""
+
+    count = 0
+    for attempt in range(tries):
+        try:
+            count = sum(1 for child in onenote.tree(object_id, "children") if child.tag.endswith(("}Section", "}SectionGroup")))
+        except RuntimeError:
+            count = 0
+        if count or not expect or attempt + 1 == tries:
+            return count
+        time.sleep(delay)
+    return count
 
 
 @tool(WRITES)

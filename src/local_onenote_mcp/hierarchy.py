@@ -87,7 +87,8 @@ def resolve_item(items: Iterable[Item], identifier: str, item_type: str | None =
             return item
     wanted = normal_path(identifier)
     for key in ("path", "name"):
-        matches = [item for item in candidates if (normal_path(item.get(key, "")) if key == "path" else item.get(key, "").strip().casefold()) == wanted]
+        # Names go through normal_path too: a title such as "A / B" must match the identifier "A / B".
+        matches = [item for item in candidates if normal_path(item.get(key, "")) == wanted]
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:

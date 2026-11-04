@@ -1,6 +1,6 @@
 [project]
 name = "local-onenote-mcp"
-version = "0.5.2"
+version = "0.6.0"
 description = "Pure-local Microsoft OneNote MCP server backed by the Windows OneNote COM API."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -13,6 +13,7 @@ from .constants import ONE_NS
 ReadFormat = Literal["text", "markdown"]
 _NS = f"{{{ONE_NS}}}"
 INK_LABEL = "[Handwriting: no recognised text; use view_page to see it]"
+RULE_TEXT = "─" * 24  # what the writer puts on the page for a Markdown rule (---)
 
 
 def _local(tag: str) -> str:
@@ -100,6 +101,7 @@ class _InlineReader(HTMLParser):
         self.markdown = markdown
         self.ignore = ignore
         self.segments: list[tuple[str, tuple[str, ...], str]] = []  # (text, marks, link)
+        # The paragraph's own style seeds the marks; result() drops those the paragraph style implies.
         self._marks: list[set[str]] = [_style_marks("", base_style)] if base_style else []
         self._base_depth = len(self._marks)
         self._links: list[str] = []
@@ -128,7 +130,7 @@ class _InlineReader(HTMLParser):
             # A raw line break in the CDATA is only source formatting (OneNote wraps long lines); <br> is the break.
             data = re.sub(r" ?\r?\n ?", " ", data)
         held = set().union(*self._marks)
-        marks = tuple(mark for mark in ("**", "*", "~~", "`") if mark in held and mark not in self.ignore)
+        marks = tuple(mark for mark in ("**", "*", "~~", "`") if mark in held)
         link = self._links[-1] if self._links else ""
         data = data.replace("\xa0", " ")
         if self.segments and (self.segments[-1][1:] == (marks, link) or (not data.strip() and not link)):
@@ -139,8 +141,14 @@ class _InlineReader(HTMLParser):
     def result(self) -> str:
         if not self.markdown:
             return "".join(text for text, _, _ in self.segments).replace("\x00", "")
+        segments = self.segments
+        for mark in self.ignore:
+            # Marks the paragraph style implies are dropped only where they cover the whole paragraph;
+            # emphasis on part of a heading or quote is real.
+            if all(mark in marks for text, marks, _ in segments if text.strip()):
+                segments = [(text, tuple(m for m in marks if m != mark), link) for text, marks, link in segments]
         lines: list[list[tuple[str, tuple[str, ...], str]]] = [[]]
-        for text, marks, link in self.segments:
+        for text, marks, link in segments:
             for number, piece in enumerate(text.split("\n")):
                 if number:
                     lines.append([])
@@ -225,7 +233,7 @@ class PageRenderer:
                 blocks.append(INK_LABEL)
             elif kind in {"InsertedFile", "MediaFile"}:
                 blocks.append(self._file(node, kind))
-        return "\n\n".join(block for block in blocks if block).strip()
+        return "\n\n".join(block for block in blocks if block).strip(" \t\r\n")
 
     def title(self) -> str | None:
         title = _child(self.root, "Title")
@@ -287,9 +295,9 @@ class PageRenderer:
         return out
 
     def _is_code(self, oe: ET.Element) -> bool:
-        if self._style(oe) == "code":
-            return True
-        return _child(oe, "List") is None and _is_mono(oe.attrib.get("style", "")) and _child(oe, "T") is not None
+        # Only the "code" paragraph style marks a code block. A Consolas font on the paragraph itself is inline
+        # code that covers the whole paragraph (OneNote moves such formatting from the text onto the paragraph).
+        return self._style(oe) == "code"
 
     def _fence(self, oes: list[ET.Element], indent: str) -> list[str]:
         code_lines: list[str] = []
@@ -350,12 +358,17 @@ class PageRenderer:
             elif kind in {"InsertedFile", "MediaFile"}:
                 lines.extend(self._indent([self._file(node, kind)], indent))
         text = "".join(body)
+        if self.markdown and not prefix and text.strip() == RULE_TEXT:
+            text = "---"
+            return [indent + text] + lines
         if text.strip() or prefix:
             text_lines = text.split("\n")
             if self.markdown:
-                text_lines = [line.strip() for line in text_lines]
+                # Leading spaces are content (indented notes, ASCII diagrams); no-break spaces keep them, since
+                # Markdown drops ordinary leading spaces.
+                text_lines = ["\xa0" * (len(line) - len(line.lstrip(" "))) + line.strip() if line.strip() else "" for line in text_lines]
                 text_lines = [line for line in text_lines if line] or [""]
-                text_lines = [_escape_line_start(line) for line in text_lines]
+                text_lines = [line if line.startswith("\xa0") else _escape_line_start(line) for line in text_lines]
                 if not heading:
                     # A <br> inside a paragraph is a hard line break.
                     text_lines = [line + "\\" for line in text_lines[:-1]] + text_lines[-1:]
@@ -415,6 +428,9 @@ class PageRenderer:
             for cell in _children(row, "Cell"):
                 lines = [line.strip() for line in self._oe_children(_child(cell, "OEChildren"), "")]
                 lines = [line for line in lines if line]
+                if self.markdown and len(lines) >= 2 and re.fullmatch(r"`{3,}", lines[0]) and lines[-1] == lines[0]:
+                    # A code block cannot live in a Markdown table cell; show it as inline code.
+                    lines = [_code_span(" ".join(lines[1:-1]))]
                 if self.markdown:
                     text = "<br>".join(line.rstrip("\\") for line in lines).replace("|", "\\|")
                 else:
@@ -472,7 +488,7 @@ def render_page(xml: str, fmt: ReadFormat = "text", *, include_ocr: bool = True,
     root = ET.fromstring(xml.encode("utf-8"))
     text = PageRenderer(root, fmt, include_ocr).render(include_title=include_title)
     text = re.sub(r"[ \t]+\n", "\n", text)
-    return re.sub(r"\n{3,}", "\n\n", text).strip()
+    return re.sub(r"\n{3,}", "\n\n", text).strip(" \t\r\n")  # a leading no-break space is indentation
 
 
 def page_title(xml: str) -> str | None:

@@ -1,5 +1,4 @@
 import base64
-import xml.etree.ElementTree as ET
 
 from local_onenote_mcp.backup import BackupStore
 

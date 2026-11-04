@@ -204,6 +204,7 @@ class PageEditor:
         if text_node is None:
             raise ValueError("This paragraph holds an image, table or file, not text; use insert/delete instead.")
         text_node.text = _inline(content, fmt)
+        _drop_text_formatting(located.oe)
         self._touch(located.outline)
 
     def insert(self, located: _Located, content: str, fmt: str, before: bool) -> int:
@@ -304,6 +305,32 @@ class PageEditor:
             return None
         body = "".join(ET.tostring(outline, encoding="unicode") for outline in outlines)
         return f'<one:Page xmlns:one="{ONE_NS}" ID="{attr(page_id)}">{self.styles.defs_xml()}{body}</one:Page>'
+
+
+_TEXT_FORMAT = re.compile(r"^(font-weight|font-style|text-decoration|font-family)\s*:", re.I)
+_MONO = re.compile(r"consolas|courier", re.I)
+
+
+def _drop_text_formatting(oe: ET.Element) -> None:
+    """Remove the bold/italic/strike/code font OneNote stored on the paragraph for its old text.
+
+    The new content says its own formatting; size, colour and an ordinary font stay.
+    """
+
+    style = oe.attrib.get("style")
+    if not style:
+        return
+    kept = []
+    for part in (piece.strip() for piece in style.split(";")):
+        if not part:
+            continue
+        if _TEXT_FORMAT.match(part) and (not part.lower().startswith("font-family") or _MONO.search(part)):
+            continue
+        kept.append(part)
+    if kept:
+        oe.set("style", ";".join(kept))
+    else:
+        del oe.attrib["style"]
 
 
 def _inline(content: str, fmt: str) -> str:
