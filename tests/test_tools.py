@@ -70,6 +70,17 @@ def test_failures_come_back_as_errors(fake):
     assert result["ok"] is False and result["error"]
 
 
+def test_get_page_by_id_reports_its_location_without_reading_all_pages(fake):
+    section, page = "{00000002-0000-0000-0000-000000000000}{1}{B0}", "{00000002-0000-0000-0000-000000000000}{1}{E123}"
+    hierarchy = HIERARCHY.replace(f'<one:Page name="Plan" ID="{PAGE}"', f'<one:Page name="Plan" ID="{page}"')
+    bridge = fake(hierarchy, {page: PAGE_XML})
+    result = run(reading.get_page, page)
+
+    assert result["page"]["path"] == "NB/Sec/Plan" and result["page"]["parent_id"] == section
+    assert result["page"]["notebook_name"] == "NB" and result["page"]["section_name"] == "Sec"
+    assert all(params.get("scope") != 4 for op, params in bridge.calls if op == "get_hierarchy")
+
+
 def test_get_page_lists_paragraphs(fake):
     fake()
     result = run(reading.get_page, PAGE, include_paragraphs=True, include_objects=True)

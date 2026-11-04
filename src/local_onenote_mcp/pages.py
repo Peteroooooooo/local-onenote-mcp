@@ -50,7 +50,7 @@ def snapshot(page_id: str, reason: str) -> int | None:
     if not backups.enabled:
         return None
     xml = onenote.page_xml(page_id, "all")
-    item = onenote.resolve(page_id, "page", full=True)
+    item = onenote.resolve(page_id, "page")
     return backups.save(
         xml,
         page_id=page_id,
@@ -79,7 +79,7 @@ def snapshot_blocks(page_id: str, page: ET.Element, outline_ids: set[str], reaso
     saved = ET.Element(page.tag, {"ID": page_id})
     saved.extend(copy.deepcopy(node) for node in [*definitions(page), *outlines])
     xml = ET.tostring(saved, encoding="unicode")
-    item = onenote.resolve(page_id, "page", full=True)
+    item = onenote.resolve(page_id, "page")
     title = page_title(ET.tostring(page, encoding="unicode")) or item.get("name", "")
     return backups.save(
         xml, page_id=page_id, section_id=item.get("parent_id") or "", path=item.get("path", ""), title=title, reason=reason, kind="blocks"

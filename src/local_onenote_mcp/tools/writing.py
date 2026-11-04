@@ -43,7 +43,7 @@ def create_item(kind: str, name: str, parent_identifier: str = "") -> dict[str, 
         raise ValueError("kind must be notebook, section or section_group.")
     if not parent_identifier:
         raise ValueError("parent_identifier (a notebook or section group) is required for sections and section groups.")
-    parent = onenote.resolve(parent_identifier, full=True)
+    parent = onenote.resolve(parent_identifier)
     if parent["type"] not in {"notebook", "section_group"}:
         raise ValueError("parent_identifier must resolve to a notebook or section_group.")
     leaf = safe_leaf_name(name)
@@ -207,7 +207,7 @@ def submit_xml(xml: str, force: bool = False) -> dict[str, Any]:
 def copy_page(page_identifier: str, destination_section_identifier: str = "") -> dict[str, Any]:
     """Copy a page, with its images, handwriting and attachments, into a section (default: its own section)."""
 
-    page = onenote.resolve(page_identifier, "page", full=True)
+    page = onenote.resolve(page_identifier, "page")
     section_id = onenote.resolve(destination_section_identifier, "section")["id"] if destination_section_identifier else page["parent_id"]
     new_id = write_copy(parse_xml(onenote.page_xml(page["id"], "all")), section_id)
     return ok(page_id=new_id, page=onenote.wait_for(item_type="page", id=new_id), copied_from=page["id"])

@@ -76,7 +76,7 @@ def resolve_identifier(identifier: str, item_type: str = "", link: str = "", par
     kind = item_type.strip().casefold() or None
     if kind and kind not in IDENTIFIER_TYPES:
         raise ValueError(f"item_type must be empty or one of: {', '.join(sorted(IDENTIFIER_TYPES))}")
-    item = onenote.resolve(identifier, kind, full=True)
+    item = onenote.resolve(identifier, kind)
     data = ok(item=item)
     if link:
         operation = LINK_OPERATIONS.get(link.strip().casefold())
@@ -103,7 +103,7 @@ def list_hierarchy(
     kind = item_type.strip().casefold()
     if kind and kind not in IDENTIFIER_TYPES:
         raise ValueError(f"item_type must be empty or one of: {', '.join(sorted(IDENTIFIER_TYPES))}")
-    start = onenote.resolve(start_identifier, full=True) if start_identifier else None
+    start = onenote.resolve(start_identifier) if start_identifier else None
     scope = "notebooks" if kind == "notebook" else "pages" if kind == "page" or start else "sections"
     items = onenote.items(start["id"] if start else "", scope)
     if start:

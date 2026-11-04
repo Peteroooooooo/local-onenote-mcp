@@ -103,20 +103,41 @@ class OneNote:
         return pages if include_recycle_bin else without_recycle_bin(pages)
 
     def lookup(self, object_id: str) -> Item | None:
-        """One object by ID without scanning the whole hierarchy (a few ms)."""
+        """One object by ID, with its full path and parent, without reading every page of every notebook."""
 
         try:
             items = parse_hierarchy(self.hierarchy_xml(object_id, "self"))
         except RuntimeError:
             return None
-        return items[0] if items else None
+        return self._located(items[0]) if items else None
 
-    def resolve(self, identifier: str, item_type: str | None = None, full: bool = False) -> Item:
-        """ID, exact path, or unique name -> live item.
+    def _located(self, item: Item) -> Item:
+        """Fill path, level and parent of an item read on its own (that read only knows the item itself)."""
 
-        For an ID the result comes from a direct lookup (a few ms) and has no path
-        or parent; pass full=True when those are needed.
-        """
+        if item["type"] == "notebook":
+            return item
+        if item["type"] == "page":
+            # A page ID starts with the GUID of the section that holds it.
+            guid = item["id"].split("}{", 1)[0]
+            for fresh in (False, True):
+                section = next(
+                    (s for s in self.items("", "sections", fresh) if s["type"] == "section" and s["id"].split("}{", 1)[0] == guid),
+                    None,
+                )
+                if section:
+                    return {
+                        **item,
+                        "path": f"{section['path']}/{item['name']}",
+                        "level": section["level"] + 1,
+                        "parent_id": section["id"],
+                        "notebook_name": section["notebook_name"],
+                        "section_name": section["name"],
+                    }
+        found = self.find(id=item["id"], item_type=item["type"]) or self.find(id=item["id"], item_type=item["type"], fresh=True)
+        return {**item, **found} if found else item
+
+    def resolve(self, identifier: str, item_type: str | None = None) -> Item:
+        """ID, exact path, or unique name -> live item, with its path and parent."""
 
         identifier = (identifier or "").strip()
         if not identifier:
@@ -126,9 +147,7 @@ class OneNote:
             if item:
                 if item_type and item["type"] != item_type:
                     raise ValueError(f"'{identifier}' is a {item['type']}, expected a {item_type}.")
-                if not full:
-                    return item
-                return self.find(id=item["id"], item_type=item["type"]) or self.find(id=item["id"], item_type=item["type"], fresh=True) or item
+                return item
         scope = "sections" if item_type in CONTAINER_TYPES else "pages"
         return resolve_item(self.items("", scope), identifier, item_type)
 

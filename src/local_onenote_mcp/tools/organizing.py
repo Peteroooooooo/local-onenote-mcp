@@ -60,7 +60,7 @@ def _settle(notebook_ids: set[str], old_file: str) -> bool:
 
 
 def _live(identifier: str, item_type: str | None = None) -> Item:
-    item = onenote.resolve(identifier, item_type, full=True)
+    item = onenote.resolve(identifier, item_type)
     if in_recycle_bin(item):
         raise ValueError(f"'{item['path']}' is in the recycle bin; restore it in OneNote first.")
     return item
@@ -88,7 +88,7 @@ def move_page(
     if level not in {0, 1, 2, 3}:
         raise ValueError("level must be 1, 2 or 3 (0 = leave as moved).")
     if level and not (destination_section_identifier or after_page_identifier or to_top):
-        page = onenote.resolve(page_identifier, "page", full=True)
+        page = onenote.resolve(page_identifier, "page")
         _set_level(page["id"], page["parent_id"], level)
         return ok(page_id=page["id"], level=level)
     page = _live(page_identifier, "page")
@@ -186,7 +186,7 @@ def move_section(
     """
 
     item = _container(section_identifier)
-    destination = _live(destination_identifier) if destination_identifier else onenote.resolve(item["parent_id"], full=True)
+    destination = _live(destination_identifier) if destination_identifier else onenote.resolve(item["parent_id"])
     if destination["type"] not in {"notebook", "section_group"}:
         raise ValueError("destination_identifier must resolve to a notebook or section_group.")
     if destination["id"] == item["id"] or destination["path"].startswith(item["path"] + "/"):
@@ -277,7 +277,7 @@ def delete_item(identifier: str, permanently: bool = False) -> dict[str, Any]:
     Pages are backed up before a delete; a permanently deleted section has each of its pages backed up.
     """
 
-    item = onenote.resolve(identifier, full=True)
+    item = onenote.resolve(identifier)
     if item["type"] == "notebook":
         raise ValueError("Notebooks are folders on disk; close them with close_notebook and delete the folder yourself.")
     backed_up = []
