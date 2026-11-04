@@ -173,7 +173,7 @@ def test_reader_maps_native_styles_back_to_markdown():
         "</one:OEChildren></one:Outline></one:Page>"
     )
 
-    assert render_page(xml, "markdown") == "## Section\n- [x] shipped\n```\na = 1\nb = 2\n```"
+    assert render_page(xml, "markdown") == "## Section\n\n- [x] shipped\n\n```\na = 1\nb = 2\n```"
 
 
 def test_reader_renders_lists_tables_and_image_ocr_as_markdown():
@@ -212,7 +212,7 @@ def test_reader_merges_font_runs_before_adding_marks():
         "</one:OEChildren></one:Outline></one:Page>"
     )
 
-    assert render_page(xml, "markdown").split("\n") == ["> 第三方 API 限流", "~~删除线~~ 和 **粗体**", "1. step", "   - detail"]
+    assert render_page(xml, "markdown").split("\n") == ["> 第三方 API 限流", "", "~~删除线~~ 和 **粗体**", "", "1. step", "   - detail"]
 
 
 def test_reader_uses_recognised_ink_text_and_labels_the_rest():

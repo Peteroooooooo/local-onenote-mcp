@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+import re
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -9,7 +11,7 @@ from typing import Any, Callable
 
 from .bridge import OneNoteBridge, OneNoteBridgeError
 from .constants import HIERARCHY_SCOPES, PAGE_INFO, XML_SCHEMA_2013, enum_value
-from .hierarchy import ONENOTE_ID, Item, of_type, parse_hierarchy, parse_xml, resolve_item, without_recycle_bin
+from .hierarchy import ONENOTE_ID, Item, in_recycle_bin, normal_path, of_type, parse_hierarchy, parse_xml, resolve_item, without_recycle_bin
 
 WRITE_OPERATIONS = {
     "close_notebook",
@@ -37,6 +39,52 @@ RETRYABLE_OPERATIONS = {
     "sync_hierarchy",
     "update_hierarchy",
 }
+# OneNote's own HRESULTs (Microsoft "Error codes (OneNote)"); the COM message for them is only the number.
+ONENOTE_ERRORS = {
+    0x80042000: "OneNote rejected the XML as malformed.",
+    0x80042001: "OneNote rejected the XML as invalid.",
+    0x80042002: "The section could not be created.",
+    0x80042003: "The section could not be opened.",
+    0x80042004: "The section does not exist.",
+    0x80042005: "The page does not exist.",
+    0x80042006: "The file does not exist.",
+    0x80042007: "The image could not be inserted.",
+    0x80042008: "The ink could not be inserted.",
+    0x80042009: "The HTML could not be inserted.",
+    0x8004200B: "The section is read-only.",
+    0x8004200C: "The page is read-only (pages in the recycle bin cannot be changed).",
+    0x8004200D: "The outline text could not be inserted.",
+    0x8004200E: "The page object does not exist (it may have been deleted or the ID is stale).",
+    0x8004200F: "The binary object does not exist.",
+    0x80042010: "The page changed since it was read; read it again and retry.",
+    0x80042011: "The section group does not exist.",
+    0x80042012: "The page does not exist in that section group.",
+    0x80042014: "The object does not exist.",
+    0x80042015: "The notebook does not exist.",
+    0x80042016: "The file could not be inserted.",
+    0x80042017: "The name is not allowed (too long, or it holds characters OneNote does not accept).",
+    0x80042018: "The folder does not exist.",
+    0x80042019: "The search query is invalid.",
+    0x8004201A: "A file with that name already exists.",
+    0x8004201B: "The section is password-protected and locked; unlock it in OneNote first.",
+    0x8004201C: "This action is disabled by policy.",
+    0x8004201D: "OneNote has not finished syncing this content yet; try again shortly.",
+    0x8004201E: "This is an old-format (2007) section; convert it in OneNote first.",
+    0x8004201F: "The merge failed.",
+    0x80042020: "The XML does not match OneNote's schema.",
+    0x80042022: "OneNote refused the change because content would be lost (newer content features on the page).",
+    0x80042023: "OneNote timed out.",
+    0x80042024: "A recording is in progress.",
+    0x8004202C: "The selection is invalid.",
+    0x8004202D: "The conversion failed.",
+    0x8004202E: "Items in the recycle bin cannot be changed; restore them first.",
+    0x80042030: "OneNote has a dialog open; close it and retry.",
+}
+
+
+def _page_id_of(xml: str) -> str:
+    match = re.search(r"<(?:\w+:)?Page\b[^>]*?\sID=\"([^\"]+)\"", xml)
+    return html.unescape(match.group(1)) if match else ""
 
 
 class OneNote:
@@ -46,6 +94,7 @@ class OneNote:
         self._lock = threading.Lock()
         self._cache: dict[tuple[str, str], tuple[float, list[Item]]] = {}
         self.on_hierarchy_read: Callable[[], None] | None = None
+        self.on_page_changed: Callable[[str], None] | None = None
 
     # -- raw calls -------------------------------------------------------
 
@@ -59,6 +108,9 @@ class OneNote:
                 time.sleep(0.5)
                 return self.bridge.call(operation, **params)
         except OneNoteBridgeError as exc:
+            explained = ONENOTE_ERRORS.get((exc.hresult or 0) & 0xFFFFFFFF)
+            if explained:
+                raise RuntimeError(f"{explained} (OneNote error 0x{exc.hresult & 0xFFFFFFFF:08X} in {operation})") from exc
             raise RuntimeError(str(exc)) from exc
         finally:
             if operation in WRITE_OPERATIONS:
@@ -82,7 +134,17 @@ class OneNote:
         return parse_xml(self.hierarchy_xml(start_id, scope))
 
     def submit_tree(self, tree: ET.Element) -> None:
+        self.ensure_window()
         self.call("update_hierarchy", xml=ET.tostring(tree, encoding="unicode"), schema=XML_SCHEMA_2013)
+
+    def ensure_window(self) -> None:
+        """Make sure OneNote has a window: a hierarchy update crashes OneNote when only COM started it."""
+
+        if not self.call("ensure_window", timeout_seconds=20).get("window"):
+            raise RuntimeError(
+                "OneNote has no open window and could not be started with one; open OneNote and retry. "
+                "(Changing the page or section order without a window crashes OneNote.)"
+            )
 
     def items(self, start_id: str = "", scope: str = "pages", fresh: bool = False) -> list[Item]:
         key = (start_id, scope)
@@ -151,12 +213,20 @@ class OneNote:
         scope = "sections" if item_type in CONTAINER_TYPES else "pages"
         return resolve_item(self.items("", scope), identifier, item_type)
 
+    def live(self, identifier: str, item_type: str | None = None) -> Item:
+        """resolve(), refusing items in the recycle bin (OneNote does not let them be changed)."""
+
+        item = self.resolve(identifier, item_type)
+        if in_recycle_bin(item):
+            raise ValueError(f"'{item['path']}' is in the recycle bin; restore it in OneNote first.")
+        return item
+
     def find(self, *, id: str = "", path: str = "", item_type: str | None = None, fresh: bool = False) -> Item | None:
         scope = "sections" if item_type in CONTAINER_TYPES else "pages"
         for item in self.items("", scope, fresh=fresh):
             if item_type and item["type"] != item_type:
                 continue
-            if (id and item["id"] == id) or (path and item["path"].casefold() == path.casefold()):
+            if (id and item["id"] == id) or (path and normal_path(item["path"]) == normal_path(path)):
                 return item
         return None
 
@@ -195,12 +265,22 @@ class OneNote:
         )["xml"]
 
     def update_page(self, xml: str | ET.Element, force: bool = False) -> None:
-        if isinstance(xml, ET.Element):
-            xml = ET.tostring(xml, encoding="unicode")
-        self.call("update_page_content", xml=xml, schema=XML_SCHEMA_2013, force=force)
+        root = xml if isinstance(xml, ET.Element) else None
+        if root is not None:
+            xml = ET.tostring(root, encoding="unicode")
+        try:
+            self.call("update_page_content", xml=xml, schema=XML_SCHEMA_2013, force=force)
+        finally:
+            page_id = root.attrib.get("ID", "") if root is not None else _page_id_of(xml)
+            if page_id and self.on_page_changed:
+                self.on_page_changed(page_id)
 
     def delete_object(self, page_id: str, object_id: str) -> None:
-        self.call("delete_page_content", page_id=page_id, object_id=object_id, force=True)
+        try:
+            self.call("delete_page_content", page_id=page_id, object_id=object_id, force=True)
+        finally:
+            if self.on_page_changed:
+                self.on_page_changed(page_id)
 
     def new_page(self, section_id: str, style: int = 1) -> str:
         return self.call("create_new_page", section_id=section_id, new_page_style=style)["page_id"]

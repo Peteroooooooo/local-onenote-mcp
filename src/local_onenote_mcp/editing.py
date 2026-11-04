@@ -18,7 +18,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from .constants import ONE, ONE_NS
-from .markup import StyleSet, html_to_inline, markdown_to_html
+from .markup import StyleSet, html_to_inline, markdown_inline_to_html
 from .pagexml import BODY_TYPES, attr, content_format, content_to_oe_xml, definitions
 from .reader import inline_text
 
@@ -174,13 +174,10 @@ class PageEditor:
 
     def _locate(self, paragraph_id: str) -> _Located:
         located = self._index.get(paragraph_id)
-        attached = located is not None and located.oe in list(located.parent) and located.outline not in self.removed
-        if attached and located.row is not None:
-            attached = located.row in list(located.table)
-        if not attached:
+        if located is None or located.outline in self.removed or not any(node is located.oe for node in located.outline.iter(ONE + "OE")):
             raise ValueError(
-                f"Paragraph '{paragraph_id}' is not on this page (deleted earlier in this edit, or a wrong ID). "
-                "IDs come from get_page(include_paragraphs=true)."
+                f"Paragraph '{paragraph_id}' is not on this page (it or a paragraph or row holding it was deleted "
+                "earlier in this edit, or the ID is wrong). IDs come from get_page(include_paragraphs=true)."
             )
         return located
 
@@ -228,6 +225,11 @@ class PageEditor:
             ET.SubElement(located.oe, ONE + "T").text = ""
         else:
             located.parent.remove(located.oe)
+            if not located.parent.findall(ONE + "OE"):
+                # An empty OEChildren under a paragraph is invalid; drop it (an outline's own one is handled on output).
+                owner = next((oe for oe in located.outline.iter(ONE + "OE") if located.parent in list(oe)), None)
+                if owner is not None:
+                    owner.remove(located.parent)
         self._touch(located.outline)
 
     def remove_object(self, object_id: str) -> None:
@@ -305,10 +307,12 @@ class PageEditor:
 
 
 def _inline(content: str, fmt: str) -> str:
+    """One paragraph's text: block Markdown (lists, headings) is not parsed, the paragraph keeps its own."""
+
     fmt = content_format(fmt)
     if fmt == "plain":
         return html.escape(content, quote=False).replace("\r\n", "\n").replace("\n", " ")
-    return html_to_inline(content if fmt == "html" else markdown_to_html(content))
+    return html_to_inline(content if fmt == "html" else markdown_inline_to_html(content))
 
 
 _TAG_SPLIT = re.compile(r"(<[^>]*>)")
@@ -330,6 +334,8 @@ def _replace_in_fragment(fragment: str, find: str, replace: str, limit: int) -> 
         elif part.lower().startswith("<br"):
             owners.append(None)
     joined = "".join(texts[owner[0]][owner[1]] if owner else "\n" for owner in owners)
+    # OneNote stores many spaces as no-break spaces; a typed space must still match them.
+    joined, find = joined.replace("\xa0", " "), find.replace("\xa0", " ")
     starts, removed, position, total = set(), set(), 0, 0
     while not limit or total < limit:
         start = joined.find(find, position)

@@ -86,5 +86,8 @@ class FakeBridge:
     def get_binary_page_content(self, page_id: str, callback_id: str):
         return {"base64": base64.b64encode(f"bytes of {callback_id}".encode()).decode()}
 
+    def ensure_window(self, timeout_seconds: int):
+        return {"window": True, "started": False}
+
     def get_special_location(self, location: int):
         return {"path": f"C:/special/{location}"}

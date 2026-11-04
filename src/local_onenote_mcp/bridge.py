@@ -152,6 +152,52 @@ function Invoke-Operation([string]$op, $p) {
         "render_pdf" {
             return Render-Pdf ([string]$p.path) ([int]$p.width) ([int]$p.max_pages)
         }
+        "ensure_window" {
+            # UpdateHierarchy crashes OneNote (onmain.dll access violation) on any page reorder while OneNote runs
+            # only as a COM server ("ONENOTE.EXE -Embedding"). With the app itself running it works, so start the
+            # app first: minimized, and through WMI so it is not a child of this process and outlives the server.
+            $uiPids = {
+                @(Get-CimInstance Win32_Process -Filter "Name = 'ONENOTE.EXE'" | Where-Object { [string]$_.CommandLine -notmatch '(?i)[-/]embedding' } | ForEach-Object { [int]$_.ProcessId })
+            }
+            $hasUi = {
+                @(& $uiPids | Where-Object { $proc = Get-Process -Id $_ -ErrorAction SilentlyContinue; $proc -and $proc.MainWindowHandle -ne 0 }).Count -gt 0
+            }
+            if (& $hasUi) { return @{ window = $true; started = $false } }
+            $exe = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\OneNote.exe' -ErrorAction SilentlyContinue).'(default)'
+            if (-not $exe -or -not (Test-Path -LiteralPath $exe)) { return @{ window = $false; started = $false } }
+            $startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]7 }
+            $null = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = "`"$exe`""; ProcessStartupInformation = $startup }
+            $deadline = (Get-Date).AddSeconds([int]$p.timeout_seconds)
+            $seen = 0
+            while ((Get-Date) -lt $deadline) {
+                # The window must stay up: a second ONENOTE.EXE can hand over to the running one and exit.
+                if (& $hasUi) { $seen++ } else { $seen = 0 }
+                if ($seen -ge 8) { break }
+                Start-Sleep -Milliseconds 250
+            }
+            if ($seen -lt 8) { return @{ window = $false; started = $true } }
+            # Reconnect, so later calls are served by the instance that owns the window.
+            if ($null -ne $script:onenote) {
+                $null = [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($script:onenote)
+                $script:onenote = $null
+                [GC]::Collect()
+                [GC]::WaitForPendingFinalizers()
+            }
+            return @{ window = $true; started = $true }
+        }
+        "image_to_png" {
+            # OneNote's XML takes only PNG, JPEG and EMF images; GIF, BMP and TIFF are converted first.
+            Add-Type -AssemblyName System.Drawing
+            $image = [System.Drawing.Image]::FromFile([string]$p.path)
+            $stream = New-Object System.IO.MemoryStream
+            try {
+                $image.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
+                return @{ base64 = [Convert]::ToBase64String($stream.ToArray()); width = $image.Width; height = $image.Height }
+            } finally {
+                $stream.Dispose()
+                $image.Dispose()
+            }
+        }
         default {
             throw "Unsupported OneNote bridge operation: $op"
         }

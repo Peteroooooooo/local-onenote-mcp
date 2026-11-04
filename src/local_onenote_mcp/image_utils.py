@@ -9,6 +9,30 @@ class ImageDimensionError(ValueError):
     """Raised when image dimensions cannot be read from a local file."""
 
 
+_SIGNATURES = (
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"\xff\xd8\xff", "jpg"),
+    (b"GIF87a", "gif"),
+    (b"GIF89a", "gif"),
+    (b"BM", "bmp"),
+    (b"II*\x00", "tiff"),
+    (b"MM\x00*", "tiff"),
+)
+
+
+def image_format(path: str | Path) -> str:
+    """The real format of an image file from its first bytes (the extension can lie)."""
+
+    with Path(path).open("rb") as handle:
+        header = handle.read(64)
+    for signature, name in _SIGNATURES:
+        if header.startswith(signature):
+            return name
+    if len(header) >= 44 and header[:4] == b"\x01\x00\x00\x00" and header[40:44] == b" EMF":
+        return "emf"
+    raise ImageDimensionError(f"{Path(path).name} is not a PNG, JPEG, GIF, BMP, TIFF or EMF image.")
+
+
 def image_dimensions(path: str | Path) -> tuple[int, int]:
     """Return native image dimensions for common local image formats."""
 
@@ -30,6 +54,7 @@ def proportional_dimensions(
     path: str | Path,
     width: float | None,
     height: float | None,
+    native: tuple[int, int] | None = None,
 ) -> tuple[float | None, float | None]:
     """Resolve a partial requested size using the image's native aspect ratio."""
 
@@ -38,7 +63,7 @@ def proportional_dimensions(
     if width is not None and height is not None:
         return float(width), float(height)
 
-    native_width, native_height = image_dimensions(path)
+    native_width, native_height = native or image_dimensions(path)
     if native_width <= 0 or native_height <= 0:
         raise ImageDimensionError(f"Invalid image dimensions: {path}")
 

@@ -293,7 +293,9 @@ def search_pages(
         for page in data["pages"]:
             try:
                 text = search.page_text(onenote, text_index, page)
-                page["snippet"] = search.snippet(text, terms) or text[:200]
+                found = search.snippet(text, terms)
+                if found:
+                    page["snippet"] = found
             except Exception as exc:
                 page["snippet_error"] = str(exc)
     return ok(count=len(data["pages"]), **data)

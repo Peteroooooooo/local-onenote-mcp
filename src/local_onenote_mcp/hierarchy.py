@@ -6,7 +6,6 @@ import re
 import xml.etree.ElementTree as ET
 from typing import Any, Iterable
 
-from .constants import ONE
 
 TYPE_MAP = {"Notebook": "notebook", "SectionGroup": "section_group", "Section": "section", "Page": "page"}
 TAG_FOR_TYPE = {value: key for key, value in TYPE_MAP.items()}
@@ -72,6 +71,12 @@ def without_recycle_bin(items: Iterable[Item]) -> list[Item]:
     return [item for item in items if not in_recycle_bin(item)]
 
 
+def normal_path(value: str) -> str:
+    """Case-folded path with spaces around each '/' and at the ends ignored, so 'Nb / Sec/' finds 'Nb/Sec'."""
+
+    return "/".join(part.strip() for part in value.strip().strip("/").split("/")).casefold()
+
+
 def resolve_item(items: Iterable[Item], identifier: str, item_type: str | None = None) -> Item:
     """Match by ID, then exact path, then unique name (both case-insensitive)."""
 
@@ -80,17 +85,17 @@ def resolve_item(items: Iterable[Item], identifier: str, item_type: str | None =
     for item in candidates:
         if item.get("id") == identifier:
             return item
-    wanted = identifier.strip().strip("/").casefold()
+    wanted = normal_path(identifier)
     for key in ("path", "name"):
-        matches = [item for item in candidates if item.get(key, "").casefold() == wanted]
+        matches = [item for item in candidates if (normal_path(item.get(key, "")) if key == "path" else item.get(key, "").strip().casefold()) == wanted]
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
             live = without_recycle_bin(matches)
             if len(live) == 1:
                 return live[0]
-            paths = ", ".join(item["path"] for item in matches[:10])
-            raise ValueError(f"Ambiguous {label} identifier '{identifier}'. Use an ID or exact path. Matches: {paths}")
+            listed = "; ".join(f"{item['path']} (ID {item['id']})" for item in matches[:10])
+            raise ValueError(f"Ambiguous {label} identifier '{identifier}': {len(matches)} matches. Use one of these IDs: {listed}")
     raise ValueError(f"No {label} found for '{identifier}'. Use an ID or exact path from list_hierarchy.")
 
 

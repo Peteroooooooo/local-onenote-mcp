@@ -64,6 +64,14 @@ class TextIndex:
             self._entries[page_id] = (stamp, text)
             self._write("insert or replace into pages (id, stamp, text) values (?, ?, ?)", [(page_id, stamp, text)])
 
+    def forget(self, page_id: str) -> None:
+        """Drop a page's entry after this server changed it (OneNote can keep the old lastModifiedTime for a while)."""
+
+        with self._lock:
+            self._load()
+            if self._entries.pop(page_id, None) is not None:
+                self._write("delete from pages where id = ?", [(page_id,)])
+
     def prune(self, live_ids: set[str]) -> int:
         with self._lock:
             self._load()

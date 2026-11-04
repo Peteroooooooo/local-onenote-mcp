@@ -98,15 +98,19 @@ def query_terms(query: str) -> list[str]:
 
 
 def score(terms: list[str], name: str, path: str, text: str) -> int:
-    """0 if any term is missing; otherwise title hits weigh most, then path, then body occurrences."""
+    """0 if any term is missing from both the title and the body; title hits weigh most.
 
-    name_l, path_l, text_l = name.casefold(), path.casefold(), text.casefold()
+    The notebook and section names are not matched (every page of notebook "Work" would match "work");
+    use start_identifier to search inside one of them.
+    """
+
+    name_l, text_l = name.casefold(), text.casefold()
     total = 0
     for term in terms:
-        in_name, in_path, body = term in name_l, term in path_l, text_l.count(term)
-        if not (in_name or in_path or body):
+        in_name, body = term in name_l, text_l.count(term)
+        if not (in_name or body):
             return 0
-        total += 20 * in_name + 5 * in_path + min(body, 10)
+        total += 20 * in_name + min(body, 10)
     return total
 
 

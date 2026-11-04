@@ -178,7 +178,7 @@ def test_whole_page_backup_restores_as_new_page_and_in_place(fake, backups_on):
     assert isinstance(deleted["backup_id"], int)
     assert listed["backups"][0]["path"] == "NB/Sec/Plan" and listed["backups"][0]["kind"] == "page"
 
-    copy = run(writing.restore_backup, deleted["backup_id"])
+    copy = run(writing.restore_backup, deleted["backup_id"], mode="new_page")
     restored = ET.fromstring(bridge.updates[-1])
     assert copy["ok"] is True and copy["page_id"] != PAGE
     assert restored.attrib == {"ID": copy["page_id"]}
@@ -188,8 +188,8 @@ def test_whole_page_backup_restores_as_new_page_and_in_place(fake, backups_on):
     assert restored.find(f".//{ONE}InsertedFile").attrib["pathSource"].endswith("doc.pdf")
 
     bridge.deleted.clear()
-    in_place = run(writing.restore_backup, deleted["backup_id"], mode="replace")
-    assert in_place["ok"] is True
+    in_place = run(writing.restore_backup, deleted["backup_id"])
+    assert in_place["ok"] is True and in_place["page_id"] == PAGE
     assert bridge.calls[-len(bridge.deleted) - 1][1]["force"] is True
     assert bridge.deleted == ["o1", "o2", "img", "f"]
 

@@ -54,9 +54,12 @@ def build_page_update_xml(
 
     styles = StyleSet() if native_styles else None
     outline = ""
-    if content:
-        body = content_to_oe_xml(content, content_format, styles)
+    body = content_to_oe_xml(content, content_format, styles) if content and content.strip() else ""
+    if body:
         outline = f"<one:Outline>{_position(x, y)}<one:OEChildren>{body}</one:OEChildren></one:Outline>"
+    if title is not None:
+        # A page title is one line; a newline in it would leave a broken second title paragraph.
+        title = " ".join(title.split())
     title_xml = f"<one:Title><one:OE>{one_t(html.escape(title, quote=False))}</one:OE></one:Title>" if title is not None else ""
     defs = styles.defs_xml() if styles else ""
     return f'<one:Page xmlns:one="{ONE_NS}" ID="{attr(page_id)}">{defs}{title_xml}{outline}</one:Page>'

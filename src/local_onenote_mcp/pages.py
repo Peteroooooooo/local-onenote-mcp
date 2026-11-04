@@ -16,16 +16,19 @@ from .pagexml import body_object_ids, content_bottom, definitions
 from .reader import page_title
 
 BLOCK_GAP = 18.0
+LEFT_MARGIN = 36.0
 BINARY_TAGS = {ONE + tag for tag in ("Image", "InkDrawing", "InkParagraph", "InkWord", "InsertedFile", "MediaFile")}
 
 
 def below_existing(page_id: str, x: float | None, y: float | None) -> tuple[float | None, float | None]:
-    """Keep caller coordinates; otherwise place a new block under the page's current content."""
+    """Keep caller coordinates; a missing y goes under the page's current content, a missing x at the left margin."""
 
-    if x is not None or y is not None:
-        return x, y
+    if y is not None:
+        return (LEFT_MARGIN if x is None else x), y
     bottom = content_bottom(onenote.page_xml(page_id))
-    return (None, None) if bottom is None else (36.0, bottom + BLOCK_GAP)
+    if bottom is None:
+        return (None, None) if x is None else (x, None)
+    return (LEFT_MARGIN if x is None else x), bottom + BLOCK_GAP
 
 
 def file_bytes(page_id: str, node: ET.Element) -> bytes | None:

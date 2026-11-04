@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 
 from markdown_it import MarkdownIt
+from markdown_it.rules_inline.state_inline import Scanned, StateInline
 
 from .constants import ONE
 
@@ -43,7 +44,7 @@ SAFE_ATTRS = {
     "span": {"style"},
 }
 
-SAFE_HREF_PREFIXES = ("http://", "https://", "onenote:", "mailto:")
+SAFE_HREF_PREFIXES = ("http://", "https://", "onenote:", "mailto:", "file:")
 
 CODE_STYLE = INLINE_STYLE_TAGS["code"]
 QUOTE_STYLE = "color:#595959;font-style:italic"
@@ -74,12 +75,53 @@ CONTAINER_TAGS = {
     "summary",
 }
 BLOCK_TAGS = CONTAINER_TAGS | set(HEADING_STYLES) | {"blockquote", "hr", "ol", "p", "pre", "table", "ul"}
+# Every other tag name is text that only looks like a tag, e.g. List<String> or <T> in prose; it is kept literally.
+KNOWN_TAGS = (
+    BLOCK_TAGS
+    | VOID_TAGS
+    | DROP_TAGS
+    | set(INLINE_STYLE_TAGS)
+    | PASSTHROUGH_INLINE_TAGS
+    | {
+        "abbr", "acronym", "audio", "bdi", "bdo", "big", "button", "canvas", "caption", "cite", "colgroup", "data",
+        "del", "dfn", "dialog", "fieldset", "font", "form", "iframe", "ins", "label", "legend", "map", "menu", "meter",
+        "nobr", "object", "optgroup", "option", "output", "picture", "progress", "q", "rp", "rt", "ruby", "samp",
+        "select", "small", "svg", "tbody", "td", "textarea", "tfoot", "th", "thead", "time", "tr", "tt", "var", "video",
+    }
+)
 
 BULLET_SYMBOLS = ("2", "3")
 TASK_PREFIX = re.compile(r"^\s*\[( |x|X)\]\s+")
 CHECKBOX = {False: "☐ ", True: "☑ "}
 
 _markdown = MarkdownIt("commonmark", {"html": True}).enable(["table", "strikethrough"])
+
+
+def _is_cjk(char: str) -> bool:
+    code = ord(char)
+    return 0x2E80 <= code <= 0x9FFF or 0xAC00 <= code <= 0xD7AF or 0xF900 <= code <= 0xFAFF or 0xFE30 <= code <= 0xFE4F or 0xFF00 <= code <= 0xFFEF
+
+
+def _cjk_friendly_scan_delims(self: StateInline, start: int, canSplitWord: bool) -> Scanned:
+    """CommonMark delimiter rules, relaxed next to CJK characters.
+
+    CommonMark does not let `**` close after punctuation when a letter follows, so `**【重点】**内容` stays
+    literal. Chinese text has no spaces around emphasis, so a CJK neighbour counts like whitespace here.
+    """
+
+    scanned = _scan_delims(self, start, canSplitWord)
+    last = self.src[start - 1] if start > 0 else " "
+    end = start + scanned.length
+    after = self.src[end] if end < self.posMax else " "
+    if not (_is_cjk(last) or _is_cjk(after)) or self.src[start] != "*":
+        return scanned
+    can_open = not after.isspace() and (scanned.can_open or _is_cjk(last) or _is_cjk(after))
+    can_close = not last.isspace() and (scanned.can_close or _is_cjk(after) or _is_cjk(last))
+    return Scanned(can_open, can_close, scanned.length)
+
+
+_scan_delims = StateInline.scanDelims
+StateInline.scanDelims = _cjk_friendly_scan_delims  # type: ignore[method-assign]
 
 
 @dataclass
@@ -93,6 +135,7 @@ class Node:
 class TableCell:
     html: str
     header: bool = False
+    align: str = "left"
 
 
 class _TreeBuilder(HTMLParser):
@@ -104,23 +147,32 @@ class _TreeBuilder(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.lower()
+        if tag not in KNOWN_TAGS and ":" not in tag:
+            self.handle_data(self.get_starttag_text() or f"<{tag}>")
+            return
         if tag in DROP_TAGS:
             self._drop_depth += 1
             return
         if self._drop_depth:
             return
-        node = Node(tag, {name.lower(): value for name, value in attrs if value is not None})
+        node = Node(tag, {name.lower(): value or "" for name, value in attrs})
         self._stack[-1].children.append(node)
         if tag not in VOID_TAGS:
             self._stack.append(node)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() not in KNOWN_TAGS and ":" not in tag:
+            self.handle_data(self.get_starttag_text() or f"<{tag}/>")
+            return
         self.handle_starttag(tag, attrs)
         if tag.lower() not in VOID_TAGS and tag.lower() not in DROP_TAGS and not self._drop_depth:
             self._stack.pop()
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
+        if tag not in KNOWN_TAGS and ":" not in tag:
+            self.handle_data(f"</{tag}>")
+            return
         if tag in DROP_TAGS:
             self._drop_depth = max(0, self._drop_depth - 1)
             return
@@ -147,6 +199,12 @@ def markdown_to_html(content: str) -> str:
     """Render CommonMark (plus GFM tables and strikethrough) to HTML."""
 
     return _markdown.render(content or "")
+
+
+def markdown_inline_to_html(content: str) -> str:
+    """Render only inline Markdown (emphasis, code, links), so '2026.', '# x' or '- x' stay plain text."""
+
+    return _markdown.renderInline(content or "")
 
 
 def _is_block(node: Node | str) -> bool:
@@ -189,9 +247,10 @@ def render_inline(nodes: list[Node | str], *, preserve_whitespace: bool = False)
         elif tag == "hr":
             parts.append("<br/>")
         elif tag == "img":
-            alt = node.attrs.get("alt", "").strip()
-            if alt:
-                parts.append(html.escape(f"[{alt}]", quote=False))
+            alt = " ".join(node.attrs.get("alt", "").split())
+            source = node.attrs.get("src", "").strip()
+            label = alt or (source if not source.startswith("data:") else "")
+            parts.append(html.escape(f"[Image: {label}]" if label else "[Image]", quote=False))
         elif tag == "input":
             if node.attrs.get("type", "").lower() == "checkbox":
                 parts.append(CHECKBOX["checked" in node.attrs])
@@ -203,6 +262,13 @@ def render_inline(nodes: list[Node | str], *, preserve_whitespace: bool = False)
             parts.append(f'<span style="{INLINE_STYLE_TAGS[tag]}">{inner}</span>')
         elif tag in PASSTHROUGH_INLINE_TAGS:
             inner = render_inline(node.children, preserve_whitespace=preserve_whitespace)
+            href = node.attrs.get("href", "").strip()
+            if tag == "a" and href and not href.lower().startswith(SAFE_HREF_PREFIXES):
+                # OneNote cannot follow a relative link; keep where it pointed as visible text.
+                scheme = re.match(r"^([a-z][a-z0-9+.-]*):", href, re.I)
+                target = "" if scheme and scheme.group(1).lower() in {"javascript", "data", "vbscript"} else href
+                parts.append(inner + (html.escape(f" ({target})", quote=False) if target and target != _text_content(node).strip() else ""))
+                continue
             parts.append(f"<{tag}{_render_attrs(node)}>{inner}</{tag}>")
         elif tag in BLOCK_TAGS:
             inner = render_inline(node.children, preserve_whitespace=preserve_whitespace)
@@ -225,7 +291,11 @@ def html_to_inline(content: str) -> str:
     return _tidy_breaks(render_inline(parse_html(content).children))
 
 
+_XML_INVALID = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
+
+
 def cdata(value: str) -> str:
+    value = _XML_INVALID.sub("", value)
     return "<![CDATA[" + value.replace("]]>", "]]]]><![CDATA[>") + "]]>"
 
 
@@ -355,9 +425,12 @@ def _paragraphs(fragment: str, context: _Context, style: str = "") -> list[str]:
     return [context.oe(_styled(part, style)) for part in fragment.split("<br/>")]
 
 
-def _list_marker(ordered: bool, number: int, depth: int) -> str:
+def _list_marker(ordered: bool, number: int, depth: int, restart: bool = False) -> str:
     if ordered:
-        return f'<one:Number numberSequence="0" numberFormat="##." text="{number}."/>'
+        # OneNote renumbers lists itself and continues a list after a paragraph break; restartNumberingAt on
+        # the first item keeps a list's own start (5. ...) and makes a new list start over.
+        restart_attr = f' restartNumberingAt="{number}"' if restart else ""
+        return f'<one:Number numberSequence="0" numberFormat="##."{restart_attr} text="{number}."/>'
     return f'<one:Bullet bullet="{BULLET_SYMBOLS[depth % len(BULLET_SYMBOLS)]}"/>'
 
 
@@ -372,13 +445,13 @@ def _render_list(node: Node, context: _Context) -> list[str]:
     except ValueError:
         number = 1
     items = []
-    for item in _list_items(node):
-        items.append(_render_list_item(item, ordered, number, context))
+    for position, item in enumerate(_list_items(node)):
+        items.append(_render_list_item(item, ordered, number, context, restart=position == 0))
         number += 1
     return items
 
 
-def _render_list_item(item: Node, ordered: bool, number: int, context: _Context) -> str:
+def _render_list_item(item: Node, ordered: bool, number: int, context: _Context, restart: bool = False) -> str:
     children = list(item.children)
     while children and isinstance(children[0], str) and not children[0].strip():
         children.pop(0)
@@ -409,7 +482,8 @@ def _render_list_item(item: Node, ordered: bool, number: int, context: _Context)
     child_oes.extend(_render_blocks(children, child_context))
     return context.oe(
         first,
-        list_xml="" if todo is not None else _list_marker(ordered, number, context.list_depth),
+        # A to-do in a bulleted list shows only its box; a numbered to-do keeps its number too.
+        list_xml="" if todo is not None and not ordered else _list_marker(ordered, number, context.list_depth, restart),
         children=child_oes,
         todo=todo,
     )
@@ -428,6 +502,11 @@ def _render_pre(node: Node, context: _Context) -> list[str]:
     return paragraphs
 
 
+def _alignment(cell: Node) -> str:
+    match = re.search(r"text-align\s*:\s*(left|center|right)", cell.attrs.get("style", ""), re.I)
+    return (match.group(1) if match else cell.attrs.get("align", "left")).lower()
+
+
 def _table_rows(node: Node) -> list[list[TableCell]]:
     rows: list[list[TableCell]] = []
 
@@ -437,7 +516,11 @@ def _table_rows(node: Node) -> list[list[TableCell]]:
                 continue
             if child.tag == "tr":
                 cells = [
-                    TableCell(html=_tidy_breaks(render_inline(cell.children)), header=cell.tag == "th")
+                    TableCell(
+                        html=_tidy_breaks(render_inline(cell.children)),
+                        header=cell.tag == "th",
+                        align=_alignment(cell),
+                    )
                     for cell in child.children
                     if isinstance(cell, Node) and cell.tag in {"td", "th"}
                 ]
@@ -454,16 +537,14 @@ def _one_table_cell(cell: TableCell) -> str:
     shading = ' shadingColor="#D9EAF7"' if cell.header else ""
     font_size = "10.5pt" if cell.header else "10.0pt"
     style_attr = f' style="font-family:\'Microsoft YaHei\';font-size:{font_size}"'
-    cell_html = cell.html
-    if cell.header:
-        cell_html = f"<span style='font-weight:bold'>{cell_html}</span>"
-    return (
-        f"<one:Cell{shading}>"
-        "<one:OEChildren>"
-        f'<one:OE alignment="left"{style_attr}>{one_t(cell_html)}</one:OE>'
-        "</one:OEChildren>"
-        "</one:Cell>"
-    )
+    alignment = cell.align if cell.align in {"left", "center", "right"} else "left"
+    # OneNote drops <br> inside a cell's text, so each line of a cell is its own paragraph.
+    paragraphs = []
+    for line in (cell.html.split("<br/>") if cell.html else [""]):
+        if cell.header and line:
+            line = f"<span style='font-weight:bold'>{line}</span>"
+        paragraphs.append(f'<one:OE alignment="{alignment}"{style_attr}>{one_t(line)}</one:OE>')
+    return f"<one:Cell{shading}><one:OEChildren>{''.join(paragraphs)}</one:OEChildren></one:Cell>"
 
 
 TABLE_MAX_WIDTH = 960.0
@@ -533,15 +614,48 @@ def _render_block(node: Node, context: _Context) -> list[str]:
         rows = _table_rows(node)
         return [one_table(rows)] if rows else []
     if tag == "blockquote":
-        return _render_blocks(node.children, context.nested(quick="blockquote"))
+        return _render_quote(node, context.nested(quick="blockquote"))
     if tag == "hr":
         return [_oe(RULE_HTML)]
     return _render_blocks(node.children, context)
 
 
+QUOTE_NESTED_TAGS = {"blockquote", "pre"}
+
+
+def _with_children(oe_xml: str, children: list[str]) -> str:
+    """Add paragraphs as indented children of an already rendered one:OE."""
+
+    closing = "</one:OEChildren></one:OE>"
+    if oe_xml.endswith(closing):
+        return oe_xml[: -len(closing)] + "".join(children) + closing
+    return oe_xml[: -len("</one:OE>")] + "<one:OEChildren>" + "".join(children) + closing
+
+
+def _render_quote(node: Node, context: _Context) -> list[str]:
+    """A quote; a quote or code block inside it is indented under the paragraph before it, so it stays inside."""
+
+    output: list[str] = []
+    run: list[Node | str] = []
+    for child in node.children:
+        if isinstance(child, Node) and child.tag in QUOTE_NESTED_TAGS and output + run:
+            output.extend(_render_blocks(run, context))
+            run = []
+            nested = _render_block(child, context)
+            if output and nested:
+                output[-1] = _with_children(output[-1], nested)
+            else:
+                output.extend(nested)
+        else:
+            run.append(child)
+    output.extend(_render_blocks(run, context))
+    return output
+
+
 def _render_blocks(nodes: list[Node | str], context: _Context) -> list[str]:
     output: list[str] = []
     run: list[Node | str] = []
+    previous = ""
 
     def flush() -> None:
         if run:
@@ -551,9 +665,15 @@ def _render_blocks(nodes: list[Node | str], context: _Context) -> list[str]:
     for node in nodes:
         if _is_block(node):
             flush()
+            if node.tag == "pre" and previous == "pre":  # type: ignore[union-attr]
+                # Two code blocks in a row would read back as one; an empty line keeps them apart.
+                output.append(context.oe(""))
             output.extend(_render_block(node, context))  # type: ignore[arg-type]
+            previous = node.tag  # type: ignore[union-attr]
         else:
             run.append(node)
+            if isinstance(node, Node) or node.strip():
+                previous = ""
     flush()
     return output
 

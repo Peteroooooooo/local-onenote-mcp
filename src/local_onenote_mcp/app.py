@@ -35,6 +35,7 @@ onenote = OneNote(bridge, cache_seconds=settings.hierarchy_cache_seconds)
 text_index = TextIndex(settings.index_path)
 indexer = Indexer(onenote, text_index, enabled=settings.background_index, refresh_seconds=settings.index_refresh_seconds)
 onenote.on_hierarchy_read = indexer.kick
+onenote.on_page_changed = text_index.forget
 backups = BackupStore(
     settings.backup_path,
     max_bytes=int(settings.backup_max_mb * 2**20),
