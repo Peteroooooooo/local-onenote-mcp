@@ -466,15 +466,35 @@ def _one_table_cell(cell: TableCell) -> str:
     )
 
 
+TABLE_MAX_WIDTH = 960.0
+COLUMN_MIN_WIDTH = 48.0
+COLUMN_MAX_WIDTH = 320.0
+CELL_PADDING = 14.0
+_TAGS = re.compile(r"<[^>]+>")
+
+
+def _text_width(cell: TableCell) -> float:
+    """Rough width in points of a cell's longest line at the 10-10.5 pt table font."""
+
+    size = 10.5 if cell.header else 10.0
+    lines = html.unescape(_TAGS.sub("\n", cell.html.replace("<br/>", "\n"))).split("\n")
+    return max((sum(size if ord(ch) > 0x2E7F else size * 0.56 for ch in line) for line in lines), default=0.0)
+
+
 def _table_column_widths(rows: list[list[TableCell]]) -> list[float]:
+    """Each column as wide as its longest cell, within limits; the table is shrunk to fit a normal page."""
+
     column_count = max((len(row) for row in rows), default=0)
     if column_count <= 0:
         return []
-    # Keep tables inside a normal OneNote page width while leaving short
-    # checklist-style tables enough room.
-    total_width = 960.0
-    width = max(90.0, min(220.0, total_width / column_count))
-    return [width] * column_count
+    widths = [COLUMN_MIN_WIDTH] * column_count
+    for row in rows:
+        for index, cell in enumerate(row[:column_count]):
+            widths[index] = max(widths[index], min(COLUMN_MAX_WIDTH, _text_width(cell) + CELL_PADDING))
+    total = sum(widths)
+    if total > TABLE_MAX_WIDTH:
+        widths = [max(COLUMN_MIN_WIDTH, width * TABLE_MAX_WIDTH / total) for width in widths]
+    return widths
 
 
 def one_table(rows: list[list[TableCell]]) -> str:

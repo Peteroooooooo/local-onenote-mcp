@@ -93,6 +93,20 @@ def test_html_table_becomes_native_table_padded_to_column_count():
     assert 'shadingColor="#D9EAF7"' in xml and "<![CDATA[<strong>1</strong>]]>" in xml
 
 
+def test_table_columns_follow_their_text_and_fit_the_page():
+    import re
+
+    def widths(markdown: str) -> list[float]:
+        xml = build_page_update_xml("p", content=markdown, content_format="markdown")
+        return [float(w) for w in re.findall(r'<one:Column index="\d+" width="([\d.]+)"', xml)]
+
+    small = widths("| a | b |\n|---|---|\n| 1 | NUS Multipurpose Sports Hall (MPSH 2) |")
+    assert small[0] < 60 and small[1] > 3 * small[0]
+    assert widths("| 考场 |\n|---|\n| 体育馆 |")[0] < widths("| 考场 |\n|---|\n| 多功能体育馆二号馆 |")[0]
+    wide = widths("|" + " long column text here |" * 8 + "\n" + "|---" * 8 + "|")
+    assert sum(wide) <= 960.5
+
+
 def test_html_writer_drops_scripts_and_unsafe_links():
     xml = html_to_oe_xml('<p><a href="javascript:alert(1)">x</a><script>bad()</script> ok <s>gone</s></p>')
 
@@ -136,11 +150,14 @@ def test_new_blocks_go_below_existing_content():
 
 def test_collect_page_objects_reports_callbacks_and_deletable_blocks():
     xml = _page("<one:OE objectID='oe-id'><one:Image format='png'><one:CallbackID callbackID='cb-1'/></one:Image></one:OE>")
+    xml = xml.replace('objectID="outline-id">', 'objectID="outline-id"><one:Position x="36" y="80"/><one:Size width="300" height="120"/>')
     objects = {obj["type"]: obj for obj in collect_page_objects(xml)}
 
+    assert set(objects) == {"Outline", "Image"}
     assert objects["Outline"]["delete_supported"] is True
-    assert objects["OE"]["delete_supported"] is False and objects["OE"]["delete_object_id"] == "outline-id"
+    assert (objects["Outline"]["x"], objects["Outline"]["y"], objects["Outline"]["height"]) == (36.0, 80.0, 120.0)
     assert objects["Image"]["callback_id"] == "cb-1" and objects["Image"]["delete_object_id"] == "outline-id"
+    assert objects["Image"]["delete_supported"] is False and objects["Image"]["parent_object_id"] == "outline-id"
 
 
 def test_reader_maps_native_styles_back_to_markdown():

@@ -108,22 +108,24 @@ def content_bottom(xml: str | ET.Element) -> float | None:
 
 
 def collect_page_objects(xml: str | ET.Element) -> list[dict[str, Any]]:
-    """Content objects outside the title, with the IDs other tools need.
+    """Blocks, images, ink and attachments outside the title, with the IDs other tools need.
 
+    Paragraphs, tables and cells are left out (get_page(include_paragraphs=true) lists those).
     delete_object_id is the nearest object DeletePageContent accepts (outlines and
-    top-level images/ink/files); callback_id downloads binary content.
+    top-level images/ink/files); callback_id downloads binary content. Top-level
+    blocks carry x/y/width/height in points.
     """
 
     root = parse_xml(xml) if isinstance(xml, str) else xml
     objects: list[dict[str, Any]] = []
 
-    def walk(node: ET.Element, parent_id: str | None, deletable_id: str | None) -> None:
+    def walk(node: ET.Element, parent_id: str | None, deletable_id: str | None, top: bool) -> None:
         kind = local_name(node.tag)
         if kind == "Title":
             return
         object_id = node.attrib.get("objectID")
-        deletable = kind in BODY_TYPES and bool(object_id)
-        if object_id or kind in {"Image", "InsertedFile", "MediaFile"}:
+        deletable = top and kind in BODY_TYPES and bool(object_id)
+        if kind in BODY_TYPES:
             record: dict[str, Any] = {"type": kind}
             if object_id:
                 record["object_id"] = object_id
@@ -138,12 +140,20 @@ def collect_page_objects(xml: str | ET.Element) -> list[dict[str, Any]]:
             for name in ("format", "preferredName", "alt"):
                 if node.attrib.get(name):
                     record[name] = node.attrib[name]
+            position, size = node.find(ONE + "Position"), node.find(ONE + "Size")
+            if top and position is not None and size is not None:
+                for key, source in (("x", position), ("y", position), ("width", size), ("height", size)):
+                    try:
+                        record[key] = round(float(source.attrib[key]), 1)
+                    except (KeyError, ValueError):
+                        pass
             objects.append(record)
+            parent_id = object_id or parent_id
         for child in node:
-            walk(child, object_id or parent_id, object_id if deletable else deletable_id)
+            walk(child, parent_id, object_id if deletable else deletable_id, False)
 
     for child in root:
-        walk(child, None, None)
+        walk(child, None, None, True)
     return objects
 
 
